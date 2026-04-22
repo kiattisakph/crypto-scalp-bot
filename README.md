@@ -53,7 +53,10 @@ The bot is designed to run 24/7 on a VPS via Docker with full self-management: a
 | LONG + SHORT support | ✅ |
 | Per-symbol signal cooldown | ✅ |
 | Filtered Replay backtest engine | ✅ |
-| ADX Market Regime Detection | ✅ |
+| Kelly Criterion adaptive sizing | ✅ |
+| Confidence-based risk scaling | ✅ |
+| Slippage Protection (spread check) | ✅ |
+| Market Regime Detection (ADX) | ✅ |
 | Funding Rate Filter | ✅ |
 
 </td>
@@ -198,6 +201,18 @@ risk:
   max_daily_loss_pct: 3.0           # Halt if daily loss exceeds 3%
   max_drawdown_pct: 5.0             # Halt if session drawdown exceeds 5%
   min_free_margin_pct: 30.0         # Require 30% free margin before opening
+
+  # Kelly Criterion (disabled by default)
+  kelly_enabled: false
+  kelly_fraction: 0.5               # Half Kelly for reduced variance
+  kelly_min_trades: 20              # Trades before Kelly activates
+  kelly_max_pct: 2.0                # Safety cap on Kelly-derived risk %
+  kelly_window: 50                  # Rolling window for Kelly calculation
+
+  # Confidence-based sizing (disabled by default)
+  confidence_scaling_enabled: false
+  confidence_exponent: 1.0          # Linear scaling; <1 gentler, >1 more aggressive
+  confidence_min_pct: 0.3           # Floor: minimum fraction of base risk
 ```
 
 ---
@@ -518,9 +533,61 @@ Position Opened
 
 ```
 risk_amount   = balance × risk_per_trade_pct / 100
-sl_distance   = entry_price × sl_pct / 100
-position_size = risk_amount / sl_distance
+sl_distance   = entry_price × sl_pct / 100          # Fixed mode
+              = ATR × atr_sl_mult                    # ATR mode
+position_size = risk_amount / (leverage × sl_distance)
 ```
+
+The inclusion of `leverage` ensures the **actual loss at stop-loss** equals `risk_amount`.
+Without it, the bot would risk `leverage ×` more than intended.
+
+When **ATR mode** is enabled, `sl_distance` uses ATR instead of a fixed percentage —
+wider SL on volatile coins = smaller position size, keeping dollar risk consistent.
+
+### Kelly Criterion (Adaptive Sizing)
+
+When `kelly_enabled: true`, the bot dynamically adjusts `risk_per_trade_pct` based on
+recent trade performance using the **Kelly Criterion**:
+
+```
+win_rate (p) = wins / total_trades
+payoff (b)   = avg_win / avg_loss
+Kelly (f*)   = (bp - q) / b    where q = 1 - p
+```
+
+The bot uses **fractional Kelly** (`kelly_fraction × f*`) with a safety cap (`kelly_max_pct`)
+to reduce variance. Kelly activates only after `kelly_min_trades` trades with a positive edge.
+If the edge turns negative, the bot falls back to `risk_per_trade_pct`.
+
+### Confidence-Based Risk Scaling
+
+When `confidence_scaling_enabled: true`, the signal's confidence score (0–1, calculated by
+the SignalEngine) scales the risk percentage:
+
+```
+confidence_factor = max(confidence_min_pct, confidence ** confidence_exponent)
+effective_risk_pct = base_risk_pct × confidence_factor
+```
+
+This means a high-confidence signal (0.9) risks nearly full size, while a low-confidence
+signal (0.3) risks significantly less — providing a natural hedge against weak signals.
+
+### Slippage Protection (Spread Check)
+
+Before sending a market order, the bot checks the **bid-ask spread** from the order book.
+If the spread exceeds `max_spread_pct` (default 0.10%), the trade is rejected:
+
+```
+spread_pct = (best_ask - best_bid) / mid_price × 100
+if spread_pct > max_spread_pct → skip trade
+```
+
+This protects against:
+- **Low liquidity coins** where wide spreads can eat into scalp profits
+- **Flash volatility** moments when order books thin out
+- **Slippage on market orders** — you don't pay the spread if you don't enter
+
+If the spread check fails, the signal is logged as skipped and the bot waits for the next candle.
 
 ### Pre-Trade Checks
 
@@ -533,6 +600,7 @@ Every trade must pass **all** of these before opening:
 | Open positions | `open_positions < max_concurrent_positions` (3) |
 | Free margin | `free_margin_pct ≥ min_free_margin_pct` (30%) |
 | Symbol cooldown | No entry on same symbol within `signal_cooldown_min` (15 min) |
+| Bid-ask spread | `spread_pct < max_spread_pct` (0.10%) |
 
 If **any** check fails → trade is rejected and the failing condition is logged.
 
@@ -555,6 +623,11 @@ If **any** check fails → trade is rejected and the failing condition is logged
 | Daily loss halt | −3% | −3% | `risk.max_daily_loss_pct` |
 | Session drawdown halt | −5% | −5% | `risk.max_drawdown_pct` |
 | Min free margin | 30% | 30% | `risk.min_free_margin_pct` |
+| Kelly fraction | 0.5× full Kelly | 0.5× full Kelly | `risk.kelly_fraction` |
+| Kelly safety cap | 2% max risk | 2% max risk | `risk.kelly_max_pct` |
+| Kelly min trades | 20 trades | 20 trades | `risk.kelly_min_trades` |
+| Confidence floor | 30% min | 30% min | `risk.confidence_min_pct` |
+| Max spread (slippage) | 0.10% | 0.10% | `risk.max_spread_pct` |
 
 ### ATR-Based TP/SL
 
@@ -686,7 +759,11 @@ Yes. Set `watchlist.top_n` in `config.yaml` to any number. The bot will dynamica
 <details>
 <summary><b>How is position size calculated?</b></summary>
 
-`position_size = (balance × risk_per_trade_pct / 100) / (entry_price × sl_pct / 100)`. This ensures you risk exactly the configured percentage per trade regardless of the symbol's price.
+`position_size = (balance × risk_per_trade_pct / 100) / (leverage × entry_price × sl_pct / 100)`.
+The `leverage` factor ensures the actual loss at SL equals the intended risk amount.
+In ATR mode, `sl_distance` uses `ATR × atr_sl_mult` instead of a fixed percentage.
+Optionally, **Kelly Criterion** adapts the risk percentage based on recent win rate and payoff ratio,
+and **confidence scaling** adjusts it by the signal's confidence score (0–1).
 </details>
 
 ---
@@ -704,6 +781,16 @@ This software is provided for educational and research purposes only. Past perfo
 ---
 
 ## Version History
+
+### v1.5.0 — Kelly Criterion, Confidence Scaling & Slippage Protection
+
+- **Kelly Criterion** adaptive position sizing — risk_pct dynamically calculated from rolling win rate and payoff ratio
+- Fractional Kelly (default 0.5×) with configurable safety cap and min-trade threshold
+- Falls back to base `risk_per_trade_pct` when data insufficient or edge is non-positive
+- **Confidence-based risk scaling** — signal confidence (0–1) scales position size; low-confidence signals risk less
+- **Slippage Protection** — pre-trade bid-ask spread check rejects market orders when spread exceeds threshold
+- **Leverage correction** in position sizing formula — actual loss at SL now matches intended risk amount
+- Configurable via `kelly_enabled`, `kelly_fraction`, `confidence_scaling_enabled`, `confidence_exponent`, `confidence_min_pct`, `max_spread_pct`
 
 ### v1.4.0 — Funding Rate Filter
 

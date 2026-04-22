@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python -m py_compile backtest/__init__.py)",
       "Bash(python -m py_compile backtest/data_fetcher.py)",
-      "Bash(python -m py_compile backtest/report.py)"
+      "Bash(python -m py_compile backtest/report.py)",
+      "Bash(python -m pytest tests/test_risk_guard.py -v)",
+      "Bash(python3 -m pytest tests/test_risk_guard.py -v)",
+      "Bash(python3:*)",
+      "Bash(pip3 install:*)",
+      "Bash(/Users/nb1003517/2026/bot/crypto-scalp-bot/venv/bin/python:*)"
     ]
   }
 }

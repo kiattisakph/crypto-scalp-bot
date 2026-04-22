@@ -74,6 +74,7 @@ class TopGainersScalping:
         get_free_margin_pct: Callable[[], Awaitable[float]] | None = None,
         get_current_price: Callable[[str], Awaitable[float]] | None = None,
         get_funding_rate: Callable[[str], Awaitable[float]] | None = None,
+        get_spread_pct: Callable[[str], Awaitable[float]] | None = None,
     ) -> None:
         self._watchlist_manager = watchlist_manager
         self._signal_engine = signal_engine
@@ -88,6 +89,7 @@ class TopGainersScalping:
         self._get_free_margin_pct = get_free_margin_pct or self._default_free_margin_pct
         self._get_current_price = get_current_price
         self._get_funding_rate = get_funding_rate
+        self._get_spread_pct = get_spread_pct
 
         # Per-symbol cooldown tracking: symbol → last entry datetime (UTC).
         self._cooldowns: dict[str, datetime] = {}
@@ -287,7 +289,21 @@ class TopGainersScalping:
                     )
                     return
 
-        reservation = await self._reserve_entry(symbol, sizing_price, atr_value)
+        # Slippage protection: check bid-ask spread before sending market order.
+        if self._get_spread_pct is not None:
+            spread_pct = await self._get_spread_pct(symbol)
+            max_spread = self._config.risk.max_spread_pct
+            if spread_pct > max_spread:
+                logger.debug(
+                    "strategy | {symbol} signal skipped — spread too wide "
+                    "({spread:.4f}% > {max:.4f}%)",
+                    symbol=symbol,
+                    spread=spread_pct,
+                    max=max_spread,
+                )
+                return
+
+        reservation = await self._reserve_entry(symbol, sizing_price, atr_value, signal.confidence)
         if reservation is None:
             return
 
@@ -340,6 +356,7 @@ class TopGainersScalping:
                 fill_price=fill_price,
                 executed_quantity=executed_quantity,
                 balance=reservation.balance,
+                atr_value=reservation.atr_value,
             )
             if executed_quantity <= 0:
                 return
@@ -420,6 +437,7 @@ class TopGainersScalping:
         symbol: str,
         sizing_price: float,
         atr_value: float | None = None,
+        confidence: float = 1.0,
     ) -> _EntryReservation | None:
         """Run the pre-trade risk check under lock and reserve the symbol."""
         async with self._entry_lock:
@@ -450,6 +468,7 @@ class TopGainersScalping:
                 open_position_count=open_position_count,
                 free_margin_pct=free_margin_pct,
                 atr_value=atr_value,
+                confidence=confidence,
             )
 
             if not risk_result.approved:
@@ -698,9 +717,10 @@ class TopGainersScalping:
         fill_price: float,
         executed_quantity: float,
         balance: float,
+        atr_value: float | None = None,
     ) -> float:
         """Reduce post-fill quantity if slippage makes risk exceed budget."""
-        max_quantity = self._max_risk_quantity(fill_price, balance)
+        max_quantity = self._max_risk_quantity(fill_price, balance, atr_value)
         if max_quantity <= 0:
             closed_quantity = await self._emergency_close_fill(
                 symbol,
@@ -761,13 +781,20 @@ class TopGainersScalping:
 
         return remaining_quantity
 
-    def _max_risk_quantity(self, fill_price: float, balance: float) -> float:
+    def _max_risk_quantity(self, fill_price: float, balance: float, atr_value: float | None = None) -> float:
         """Calculate max quantity whose SL distance stays within risk budget."""
         risk_amount = balance * self._config.risk.risk_per_trade_pct / 100
-        sl_distance = fill_price * self._config.strategy.exit.sl_pct / 100
+        leverage = self._config.risk.leverage
+        exit_cfg = self._config.strategy.exit
+
+        if atr_value is not None and exit_cfg.atr_mode:
+            sl_distance = atr_value * exit_cfg.atr_sl_mult
+        else:
+            sl_distance = fill_price * exit_cfg.sl_pct / 100
+
         if risk_amount <= 0 or sl_distance <= 0:
             return 0.0
-        return risk_amount / sl_distance
+        return risk_amount / (leverage * sl_distance)
 
     async def _emergency_close_fill(
         self,

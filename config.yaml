@@ -64,3 +64,20 @@ risk:
   max_drawdown_pct: 5.0
   min_free_margin_pct: 30.0
   reconciliation_interval_sec: 30
+
+  # Kelly Criterion — adapts risk_per_trade_pct based on recent performance.
+  # Disabled by default. Enable after 20+ trades with a positive edge.
+  kelly_enabled: false
+  kelly_fraction: 0.5          # Half Kelly for reduced variance
+  kelly_min_trades: 20         # Trades before Kelly activates
+  kelly_max_pct: 2.0           # Safety cap on Kelly-derived risk %
+  kelly_window: 50             # Rolling window for Kelly calculation
+
+  # Confidence-based sizing — scales risk by signal confidence (0-1).
+  # Higher-confidence signals risk more, lower-confidence signals risk less.
+  confidence_scaling_enabled: false
+  confidence_exponent: 1.0     # Linear scaling; use <1 for gentler, >1 for more aggressive
+  confidence_min_pct: 0.3      # Floor: minimum fraction of base risk for any signal
+
+  # Slippage protection — reject market orders when spread is too wide.
+  max_spread_pct: 0.10         # Skip trade if bid-ask spread > 0.10%

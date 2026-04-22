@@ -157,6 +157,7 @@ class BotEngine:
             get_free_margin_pct=self._get_free_margin_pct,
             get_current_price=self._get_current_price,
             get_funding_rate=self._get_funding_rate,
+            get_spread_pct=self._get_spread_pct,
         )
 
         # --- 7. Create stream components ---
@@ -1727,4 +1728,17 @@ class BotEngine:
             return await self._order_manager.get_funding_rate(symbol)
         except Exception:
             log.exception("Failed to fetch funding rate for {symbol}", symbol=symbol)
+            return 0.0
+
+    async def _get_spread_pct(self, symbol: str) -> float:
+        """Return current bid-ask spread as a percentage for the symbol.
+
+        Returns 0.0 on failure — the spread check is a gate, so 0.0
+        means "cannot determine" and should be treated as safe-to-proceed.
+        """
+        assert self._order_manager is not None
+        try:
+            return await self._order_manager.get_spread_pct(symbol)
+        except Exception:
+            log.exception("Failed to fetch spread for {symbol}", symbol=symbol)
             return 0.0

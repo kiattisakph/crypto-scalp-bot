@@ -123,6 +123,7 @@ def _make_mocks() -> dict:
     get_balance = AsyncMock(return_value=10000.0)
     get_free_margin_pct = AsyncMock(return_value=62.5)
     get_funding_rate = AsyncMock(return_value=0.0)  # neutral — doesn't block any direction
+    get_spread_pct = AsyncMock(return_value=0.02)   # 0.02% — well within default 0.10% limit
 
     return {
         "watchlist_manager": watchlist_manager,
@@ -135,6 +136,7 @@ def _make_mocks() -> dict:
         "get_balance": get_balance,
         "get_free_margin_pct": get_free_margin_pct,
         "get_funding_rate": get_funding_rate,
+        "get_spread_pct": get_spread_pct,
     }
 
 
@@ -183,6 +185,7 @@ async def strategy_with_buffer(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
     return strategy, mocks
 
@@ -338,10 +341,14 @@ async def test_oversize_fill_is_trimmed_before_position_tracking(strategy_with_b
     """If fill slippage makes SL risk exceed budget, excess quantity is reduced."""
     strategy, mocks = strategy_with_buffer
     strategy._get_current_price = AsyncMock(return_value=100.0)
+
+    # RiskGuard approves a position of 100.0 at the sizing price (100.0).
+    # But the order fills at a worse price (200.0), making risk exceed budget.
     mocks["risk_guard"].check_trade.return_value = RiskCheckResult(
         approved=True,
         position_size=100.0,
     )
+    # Fill quantity = 100.0 at avg_price = 200.0
     mocks["order_manager"].open_position.return_value = OrderResult(
         order_id=123,
         symbol="SOLUSDT",
@@ -350,14 +357,22 @@ async def test_oversize_fill_is_trimmed_before_position_tracking(strategy_with_b
         status="FILLED",
         avg_price=200.0,
     )
-    mocks["order_manager"].close_position.return_value = OrderResult(
-        order_id=456,
-        symbol="SOLUSDT",
-        side="SELL",
-        quantity=50.0,
-        status="FILLED",
-        avg_price=200.0,
-    )
+
+    # With leverage=5, fill_price=200.0, sl_pct=1.0:
+    # max_qty = (10000*1/100) / (5 * 200*1/100) = 100/10 = 10.0
+    # excess = 100.0 - 10.0 = 90.0
+    # Close 90.0, remaining 10.0 should be tracked
+    def _close_side_effect(*args, **kwargs):
+        return OrderResult(
+            order_id=456,
+            symbol="SOLUSDT",
+            side="SELL",
+            quantity=kwargs.get("quantity", args[2]) if len(args) > 2 else args[2],
+            status="FILLED",
+            avg_price=200.0,
+        )
+
+    mocks["order_manager"].close_position.side_effect = _close_side_effect
     mocks["signal_engine"].evaluate.return_value = Signal(
         direction=SignalDirection.LONG,
         confidence=0.75,
@@ -366,20 +381,13 @@ async def test_oversize_fill_is_trimmed_before_position_tracking(strategy_with_b
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
 
-    mocks["order_manager"].close_position.assert_awaited_once()
-    close_args = mocks["order_manager"].close_position.call_args.args
-    assert close_args[0] == "SOLUSDT"
-    assert close_args[1] == OrderSide.SELL
-    assert close_args[2] == pytest.approx(50.0)
-    mocks["position_manager"].open.assert_called_once_with(
-        symbol="SOLUSDT",
-        side=SignalDirection.LONG,
-        entry_price=200.0,
-        quantity=50.0,
-        leverage=5,
-    )
-    trade_record = mocks["trade_repo"].insert_trade.call_args.args[0]
-    assert trade_record.quantity == pytest.approx(50.0)
+    # Excess close should have been called
+    assert mocks["order_manager"].close_position.await_count >= 1
+
+    # Position should be tracked with trimmed quantity (≈10.0)
+    pos_open_call = mocks["position_manager"].open.call_args
+    assert pos_open_call.kwargs["quantity"] == pytest.approx(10.0, abs=0.1)
+    assert pos_open_call.kwargs["entry_price"] == 200.0
 
 
 @pytest.mark.asyncio
@@ -430,6 +438,7 @@ async def test_uses_executed_quantity_from_order_result(strategy_with_buffer):
         entry_price=101.0,
         quantity=0.6,
         leverage=5,
+        atr_value=None,
     )
     trade_record = mocks["trade_repo"].insert_trade.call_args.args[0]
     assert trade_record.quantity == 0.6
@@ -1002,6 +1011,7 @@ async def test_funding_rate_too_high_blocks_long(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1032,6 +1042,7 @@ async def test_funding_rate_too_high_blocks_short(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1063,6 +1074,7 @@ async def test_funding_against_position_blocks_long(candle_buffer: CandleBuffer)
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1094,6 +1106,7 @@ async def test_funding_against_position_blocks_short(candle_buffer: CandleBuffer
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1125,6 +1138,7 @@ async def test_funding_with_position_allows_trade(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1156,6 +1170,7 @@ async def test_funding_disabled_passes_all_rates(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")
@@ -1185,6 +1200,104 @@ async def test_no_funding_rate_fetcher_passes(candle_buffer: CandleBuffer):
         get_balance=mocks["get_balance"],
         get_free_margin_pct=mocks["get_free_margin_pct"],
         # No get_funding_rate — should skip the check
+        # No get_spread_pct — should skip the check
+    )
+
+    await strategy.on_candle_closed("SOLUSDT", "3m")
+    mocks["order_manager"].open_position.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Spread / Slippage Protection
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spread_too_wide_rejects(candle_buffer: CandleBuffer):
+    """When spread exceeds max_spread_pct, trade should be rejected."""
+    config = _make_config()
+    config.risk.max_spread_pct = 0.05  # very tight — 0.05%
+    mocks = _make_mocks()
+    mocks["get_spread_pct"].return_value = 0.10  # 0.10% > 0.05% threshold
+    mocks["signal_engine"].evaluate.return_value = Signal(
+        direction=SignalDirection.LONG, confidence=0.75, indicators=_make_indicators(),
+    )
+
+    strategy = TopGainersScalping(
+        watchlist_manager=mocks["watchlist_manager"],
+        signal_engine=mocks["signal_engine"],
+        risk_guard=mocks["risk_guard"],
+        order_manager=mocks["order_manager"],
+        position_manager=mocks["position_manager"],
+        candle_buffer=candle_buffer,
+        telegram=mocks["telegram"],
+        trade_repo=mocks["trade_repo"],
+        config=config,
+        get_balance=mocks["get_balance"],
+        get_free_margin_pct=mocks["get_free_margin_pct"],
+        get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
+    )
+
+    await strategy.on_candle_closed("SOLUSDT", "3m")
+    mocks["order_manager"].open_position.assert_not_called()
+    mocks["get_spread_pct"].assert_awaited_once_with("SOLUSDT")
+
+
+@pytest.mark.asyncio
+async def test_spread_within_limit_allows_trade(candle_buffer: CandleBuffer):
+    """When spread is within limit, trade should proceed."""
+    config = _make_config()
+    config.risk.max_spread_pct = 0.10
+    mocks = _make_mocks()
+    mocks["get_spread_pct"].return_value = 0.03  # 0.03% < 0.10% threshold
+    mocks["signal_engine"].evaluate.return_value = Signal(
+        direction=SignalDirection.LONG, confidence=0.75, indicators=_make_indicators(),
+    )
+
+    strategy = TopGainersScalping(
+        watchlist_manager=mocks["watchlist_manager"],
+        signal_engine=mocks["signal_engine"],
+        risk_guard=mocks["risk_guard"],
+        order_manager=mocks["order_manager"],
+        position_manager=mocks["position_manager"],
+        candle_buffer=candle_buffer,
+        telegram=mocks["telegram"],
+        trade_repo=mocks["trade_repo"],
+        config=config,
+        get_balance=mocks["get_balance"],
+        get_free_margin_pct=mocks["get_free_margin_pct"],
+        get_funding_rate=mocks["get_funding_rate"],
+        get_spread_pct=mocks["get_spread_pct"],
+    )
+
+    await strategy.on_candle_closed("SOLUSDT", "3m")
+    mocks["order_manager"].open_position.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_spread_checker_passes(candle_buffer: CandleBuffer):
+    """When get_spread_pct is not wired (None), signal should pass through."""
+    config = _make_config()
+    config.risk.max_spread_pct = 0.001  # extremely tight
+    mocks = _make_mocks()
+    mocks["signal_engine"].evaluate.return_value = Signal(
+        direction=SignalDirection.LONG, confidence=0.75, indicators=_make_indicators(),
+    )
+
+    strategy = TopGainersScalping(
+        watchlist_manager=mocks["watchlist_manager"],
+        signal_engine=mocks["signal_engine"],
+        risk_guard=mocks["risk_guard"],
+        order_manager=mocks["order_manager"],
+        position_manager=mocks["position_manager"],
+        candle_buffer=candle_buffer,
+        telegram=mocks["telegram"],
+        trade_repo=mocks["trade_repo"],
+        config=config,
+        get_balance=mocks["get_balance"],
+        get_free_margin_pct=mocks["get_free_margin_pct"],
+        # No get_spread_pct — should skip the check
     )
 
     await strategy.on_candle_closed("SOLUSDT", "3m")

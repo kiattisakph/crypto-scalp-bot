@@ -264,6 +264,21 @@ class RiskConfig(BaseModel):
     min_free_margin_pct: float = 30.0
     reconciliation_interval_sec: int = 30
 
+    # Kelly Criterion parameters for adaptive position sizing
+    kelly_enabled: bool = False
+    kelly_fraction: float = 0.5        # Fractional Kelly (0.5 = half Kelly)
+    kelly_min_trades: int = 20         # Minimum trades before Kelly activates
+    kelly_max_pct: float = 2.0         # Maximum risk_pct from Kelly (safety cap)
+    kelly_window: int = 50             # Rolling window size for Kelly calculation
+
+    # Confidence-based volatility adjustment
+    confidence_scaling_enabled: bool = False
+    confidence_exponent: float = 1.0   # How aggressively confidence scales sizing
+    confidence_min_pct: float = 0.3    # Minimum risk_pct multiplier for low-confidence signals
+
+    # Slippage protection — pre-trade bid-ask spread check
+    max_spread_pct: float = 0.10       # Reject market orders if spread > 0.10%
+
     @field_validator("risk_per_trade_pct", "max_daily_loss_pct", "max_drawdown_pct")
     @classmethod
     def _pct_positive(cls, v: float, info) -> float:
@@ -297,6 +312,48 @@ class RiskConfig(BaseModel):
     def _reconciliation_interval_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError(f"reconciliation_interval_sec must be > 0, got {v}")
+        return v
+
+    @field_validator("kelly_fraction")
+    @classmethod
+    def _kelly_fraction_valid(cls, v: float) -> float:
+        if not 0.01 <= v <= 1:
+            raise ValueError(f"kelly_fraction must be between 0.01 and 1, got {v}")
+        return v
+
+    @field_validator("kelly_min_trades", "kelly_window")
+    @classmethod
+    def _kelly_counts_positive(cls, v: int, info) -> int:
+        if v <= 0:
+            raise ValueError(f"{info.field_name} must be > 0, got {v}")
+        return v
+
+    @field_validator("kelly_max_pct")
+    @classmethod
+    def _kelly_max_pct_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"kelly_max_pct must be > 0, got {v}")
+        return v
+
+    @field_validator("confidence_exponent")
+    @classmethod
+    def _confidence_exponent_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"confidence_exponent must be > 0, got {v}")
+        return v
+
+    @field_validator("confidence_min_pct")
+    @classmethod
+    def _confidence_min_pct_valid(cls, v: float) -> float:
+        if not 0 < v < 1:
+            raise ValueError(f"confidence_min_pct must be between 0 (exclusive) and 1, got {v}")
+        return v
+
+    @field_validator("max_spread_pct")
+    @classmethod
+    def _max_spread_pct_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"max_spread_pct must be > 0, got {v}")
         return v
 
 

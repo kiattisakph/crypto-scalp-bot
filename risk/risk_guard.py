@@ -6,6 +6,7 @@ Calculates position size using the mandatory formula from risk rules.
 """
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
@@ -48,6 +49,10 @@ class RiskGuard:
         self._session_drawdown_pct: float = 0.0
         self._halted: bool = False
 
+        # Kelly Criterion rolling window of recent trade PnLs.
+        window = risk_config.kelly_window if risk_config.kelly_enabled else 0
+        self._kelly_pnls: deque[float] = deque(maxlen=window)
+
         # Async callback to flatten all open positions on halt.
         # Wired by BotEngine — RiskGuard never imports execution layer.
         self.on_flatten_all: Callable[[], Awaitable[None]] | None = None
@@ -84,6 +89,73 @@ class RiskGuard:
             )
 
     # ------------------------------------------------------------------
+    # Kelly Criterion
+    # ------------------------------------------------------------------
+
+    def _calc_kelly_pct(self) -> float | None:
+        """Calculate the Kelly-optimal risk percentage.
+
+        Uses the rolling window of recent trade PnLs to estimate:
+        - Win rate (p)
+        - Payoff ratio (b = avg_win / avg_loss)
+        - Kelly fraction: f* = (bp - q) / b
+
+        Returns the fractional Kelly risk percentage, or ``None`` when
+        there is insufficient data or the edge is non-positive.
+        """
+        if not self._risk_config.kelly_enabled:
+            return None
+        if len(self._kelly_pnls) < self._risk_config.kelly_min_trades:
+            return None
+
+        wins = [p for p in self._kelly_pnls if p > 0]
+        losses = [p for p in self._kelly_pnls if p <= 0]
+
+        if not wins or not losses:
+            return None
+
+        win_rate = len(wins) / len(self._kelly_pnls)
+        loss_rate = 1.0 - win_rate
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+
+        if avg_loss == 0:
+            return None
+
+        payoff_ratio = avg_win / avg_loss  # b in Kelly formula
+
+        # Full Kelly: f* = (bp - q) / b
+        kelly_full = (payoff_ratio * win_rate - loss_rate) / payoff_ratio
+
+        if kelly_full <= 0:
+            # No edge — don't trade
+            logger.warning(
+                "risk_guard | Kelly edge non-positive | "
+                "win_rate={wr:.2f} payoff={pr:.2f} kelly={k:.4f}",
+                wr=win_rate,
+                pr=payoff_ratio,
+                k=kelly_full,
+            )
+            return None
+
+        # Apply fractional Kelly for reduced variance
+        kelly_fractional = kelly_full * self._risk_config.kelly_fraction
+
+        # Convert to percentage of balance and apply safety cap
+        kelly_pct = min(kelly_fractional * 100, self._risk_config.kelly_max_pct)
+
+        logger.info(
+            "risk_guard | Kelly calculated | win_rate={wr:.2f} payoff={pr:.2f} "
+            "kelly_full={kf:.4f} kelly_frac={kc:.4f} risk_pct={pct:.2f}%",
+            wr=win_rate,
+            pr=payoff_ratio,
+            kf=kelly_full,
+            kc=kelly_fractional,
+            pct=kelly_pct,
+        )
+        return kelly_pct
+
+    # ------------------------------------------------------------------
     # Pre-trade risk check
     # ------------------------------------------------------------------
 
@@ -94,6 +166,7 @@ class RiskGuard:
         open_position_count: int = 0,
         free_margin_pct: float = 100.0,
         atr_value: float | None = None,
+        confidence: float = 1.0,
     ) -> RiskCheckResult:
         """Check all risk conditions and calculate position size.
 
@@ -103,11 +176,16 @@ class RiskGuard:
         3. Open positions < ``max_concurrent_positions``
         4. Free margin >= ``min_free_margin_pct``
 
-        Position size formula (mandatory, non-negotiable):
+        Position size formula:
             risk_amount  = balance * risk_per_trade_pct / 100
             sl_distance  = ATR × atr_sl_mult   (ATR mode)
                          = entry_price × sl_pct / 100  (fixed mode)
-            position_size = risk_amount / sl_distance
+            position_size = risk_amount / (leverage × sl_distance)
+
+        When ``confidence_scaling_enabled`` is true, the risk percentage
+        is multiplied by a confidence factor:
+            confidence_factor = max(confidence_min_pct, confidence ** confidence_exponent)
+            effective_risk_pct = base_risk_pct × confidence_factor
 
         Args:
             entry_price: Intended entry price for the trade.
@@ -118,6 +196,8 @@ class RiskGuard:
                 When provided and ``atr_mode`` is enabled, SL distance
                 is calculated as ``atr_value × atr_sl_mult`` instead of
                 a fixed percentage.
+            confidence: Signal confidence in (0, 1]. Used for
+                confidence-based risk scaling when enabled.
 
         Returns:
             A :class:`RiskCheckResult` — approved with ``position_size``
@@ -168,14 +248,48 @@ class RiskGuard:
             logger.warning("risk_guard | Trade rejected: {reason}", reason=reason)
             return RiskCheckResult(approved=False, reject_reason=reason)
 
-        # --- Position sizing (mandatory formula) ---
-        risk_amount = balance * self._risk_config.risk_per_trade_pct / 100
+        # --- Position sizing ---
+        # Risk per trade: dollar amount we're willing to lose if SL hits.
+        # Use Kelly Criterion when enabled and sufficient data exists.
+        kelly_pct = self._calc_kelly_pct()
+        if kelly_pct is not None:
+            risk_pct = kelly_pct
+            logger.info(
+                "risk_guard | Using Kelly risk_pct={pct:.2f}% (base={base}%)",
+                pct=kelly_pct,
+                base=self._risk_config.risk_per_trade_pct,
+            )
+        else:
+            risk_pct = self._risk_config.risk_per_trade_pct
+
+        # Confidence-based volatility adjustment.
+        if self._risk_config.confidence_scaling_enabled:
+            exp = self._risk_config.confidence_exponent
+            min_factor = self._risk_config.confidence_min_pct
+            confidence_factor = max(min_factor, confidence ** exp)
+            risk_pct *= confidence_factor
+            logger.debug(
+                "risk_guard | Confidence scaling applied | conf={c:.3f} "
+                "factor={f:.3f} risk_pct={pct:.2f}%",
+                c=confidence,
+                f=confidence_factor,
+                pct=risk_pct,
+            )
+
+        risk_amount = balance * risk_pct / 100
 
         if atr_value is not None and self._exit_config.atr_mode:
             sl_distance = atr_value * self._exit_config.atr_sl_mult
         else:
             sl_distance = entry_price * self._exit_config.sl_pct / 100
-        position_size = risk_amount / sl_distance
+
+        # Position size so that loss at SL equals risk_amount.
+        # With leverage, notional = position_size * entry_price * leverage,
+        # and loss = notional * (sl_distance / entry_price)
+        #          = position_size * leverage * sl_distance.
+        # Therefore: position_size = risk_amount / (leverage * sl_distance).
+        leverage = self._risk_config.leverage
+        position_size = risk_amount / (leverage * sl_distance)
 
         if position_size <= 0:
             reason = "calculated position size too small"
@@ -207,6 +321,10 @@ class RiskGuard:
             pnl_usdt: Realized profit (positive) or loss (negative) in USDT.
             balance: Current account balance used for drawdown calculation.
         """
+        # Track trade PnL for Kelly Criterion rolling window.
+        if self._risk_config.kelly_enabled:
+            self._kelly_pnls.append(pnl_usdt)
+
         # Update daily cumulative loss (only losses count)
         if pnl_usdt < 0:
             self._daily_loss_usdt += pnl_usdt  # pnl_usdt is negative

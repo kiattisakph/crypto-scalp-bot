@@ -163,6 +163,60 @@ class OrderManager:
             )
             return 0.0
 
+    async def get_spread_pct(self, symbol: str) -> float:
+        """Fetch the current bid-ask spread as a percentage.
+
+        Returns:
+            Spread percentage (e.g. 0.05 means 0.05%).
+            0.0 if the spread cannot be determined.
+        """
+        async def _do_get_depth() -> dict:
+            assert self._client is not None
+            return await self._client.futures_order_book(
+                symbol=symbol,
+                limit=5,
+            )
+
+        try:
+            raw = await self._execute_with_retry(
+                f"get_spread_pct({symbol})",
+                _do_get_depth,
+            )
+            bids = raw.get("bids", [])
+            asks = raw.get("asks", [])
+            if not bids or not asks:
+                logger.warning(
+                    "order | Empty order book for {symbol}, cannot compute spread",
+                    symbol=symbol,
+                )
+                return 0.0
+
+            best_bid = float(bids[0][0])
+            best_ask = float(asks[0][0])
+            mid = (best_bid + best_ask) / 2.0
+            spread = best_ask - best_bid
+
+            if mid <= 0:
+                return 0.0
+
+            spread_pct = (spread / mid) * 100.0
+            logger.debug(
+                "order | Spread for {symbol}: bid={bid} ask={ask} "
+                "mid={mid} spread_pct={sp:.4f}%",
+                symbol=symbol,
+                bid=best_bid,
+                ask=best_ask,
+                mid=mid,
+                sp=spread_pct,
+            )
+            return spread_pct
+        except Exception:
+            logger.warning(
+                "order | Failed to fetch order book for {symbol}",
+                symbol=symbol,
+            )
+            return 0.0
+
     async def open_position(
         self,
         symbol: str,

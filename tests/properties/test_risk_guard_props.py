@@ -75,7 +75,8 @@ def test_position_size_matches_formula(
     sl_pct: float,
 ) -> None:
     """Position size equals (balance × risk_per_trade_pct / 100) /
-    (entry_price × sl_pct / 100) and is always a positive finite number.
+    (leverage × entry_price × sl_pct / 100) and is always a positive
+    finite number.
 
     **Validates: Requirements 9.1**
     """
@@ -86,10 +87,11 @@ def test_position_size_matches_formula(
     # Trade must be approved (no risk limits breached in a fresh guard)
     assert result.approved is True, f"Trade unexpectedly rejected: {result.reject_reason}"
 
-    # Verify the exact formula
+    # Verify the exact formula with leverage
     expected_risk_amount = balance * risk_per_trade_pct / 100
     expected_sl_distance = entry_price * sl_pct / 100
-    expected_position_size = expected_risk_amount / expected_sl_distance
+    leverage = 5  # matches _make_guard default
+    expected_position_size = expected_risk_amount / (leverage * expected_sl_distance)
 
     assert result.position_size == expected_position_size, (
         f"position_size mismatch: got {result.position_size}, "
