@@ -6,11 +6,14 @@ Only closed candles (``x=true``) are forwarded to the
 ``on_candle_closed`` callback.
 
 The timeframes are read from config (``signal_timeframe`` and
-``trend_timeframe``) and passed at construction time — no hardcoded
+``trend_timeframe``) and passed at construction time -- no hardcoded
 interval values.
 
 Includes exponential backoff reconnection logic per symbol with
 disconnect timeout handling via async callbacks wired by BotEngine.
+
+Uses direct WebSocket connections via ``core.binance_client`` instead
+of the ``python-binance`` wrapper.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
-from binance import AsyncClient, BinanceSocketManager
+from core.binance_client import BinanceClient, ReconnectingWebSocket
 from loguru import logger
 
 log = logger.bind(component="stream")
@@ -44,14 +47,14 @@ class KlineStream:
     execution or notification modules.
 
     Args:
-        client: An initialised ``binance.AsyncClient`` instance.
+        client: An initialised ``BinanceClient`` instance.
         timeframes: Kline interval strings to subscribe per symbol
             (e.g. ``["3m", "15m"]``).  Sourced from
             ``strategy.signal_timeframe`` and ``strategy.trend_timeframe``
             in config.
     """
 
-    def __init__(self, client: AsyncClient, timeframes: list[str]) -> None:
+    def __init__(self, client: BinanceClient, timeframes: list[str]) -> None:
         if not timeframes:
             raise ValueError("timeframes must contain at least one interval")
 
@@ -66,13 +69,13 @@ class KlineStream:
         # Track subscribed symbols for potential resubscription
         self._subscribed_symbols: set[str] = set()
 
-        # Callback — set by BotEngine before subscribing.
+        # Callback -- set by BotEngine before subscribing.
         # Signature: (symbol, timeframe, candle_data) -> Awaitable[None]
         self.on_candle_closed: (
             Callable[[str, str, dict], Awaitable[None]] | None
         ) = None
 
-        # Reconnection callbacks — wired by BotEngine.
+        # Reconnection callbacks -- wired by BotEngine.
         # Called when any symbol disconnected > 60s so BotEngine can close positions.
         self.on_disconnect_timeout: Callable[[], Awaitable[None]] | None = None
         # Called on successful reconnect with disconnection duration in seconds.
@@ -104,9 +107,8 @@ class KlineStream:
 
         self._subscribed_symbols.add(symbol)
 
-        bm = BinanceSocketManager(self._client)
         streams = [f"{lower}@kline_{tf}" for tf in self._timeframes]
-        socket = bm.futures_multiplex_socket(streams=streams)
+        socket = ReconnectingWebSocket(self._client, streams=streams)
         self._sockets[symbol] = socket
         self._tasks[symbol] = asyncio.create_task(
             self._listen(symbol, socket),
@@ -180,7 +182,7 @@ class KlineStream:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _listen(self, symbol: str, socket: Any) -> None:
+    async def _listen(self, symbol: str, socket: ReconnectingWebSocket) -> None:
         """Read messages from a symbol's kline WebSocket.
 
         When the loop ends unexpectedly (not due to an explicit
@@ -189,7 +191,7 @@ class KlineStream:
 
         Args:
             symbol: The trading pair symbol this socket belongs to.
-            socket: The ``ReconnectingWebsocket`` context manager.
+            socket: The ``ReconnectingWebSocket`` context manager.
         """
         try:
             async with socket as stream:
@@ -217,7 +219,7 @@ class KlineStream:
             )
 
         # If the symbol is still supposed to be subscribed, the disconnect
-        # was unexpected — start the reconnection loop for this symbol.
+        # was unexpected -- start the reconnection loop for this symbol.
         if symbol in self._subscribed_symbols:
             log.warning(
                 "KlineStream | Unexpected disconnect for {symbol}, starting reconnection",
@@ -230,7 +232,7 @@ class KlineStream:
     async def _reconnect_symbol(self, symbol: str) -> None:
         """Attempt to reconnect a single symbol with exponential backoff.
 
-        Backoff schedule: 1s → 2s → 4s → 8s → 16s → 30s (max).
+        Backoff schedule: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (max).
         Calls ``on_disconnect_timeout`` once when disconnected > 60s.
         Calls ``on_reconnected`` with duration on successful reconnect.
         Resets backoff after a successful reconnection.
@@ -273,9 +275,8 @@ class KlineStream:
                         pass
 
                 lower = symbol.lower()
-                bm = BinanceSocketManager(self._client)
                 streams = [f"{lower}@kline_{tf}" for tf in self._timeframes]
-                new_socket = bm.futures_multiplex_socket(streams=streams)
+                new_socket = ReconnectingWebSocket(self._client, streams=streams)
                 self._sockets[symbol] = new_socket
 
                 duration = time.monotonic() - disconnect_start
@@ -315,7 +316,7 @@ class KlineStream:
 
             except Exception as exc:
                 log.warning(
-                    "KlineStream | Reconnection attempt failed for {symbol}: {error} — retrying in {backoff}s",
+                    "KlineStream | Reconnection attempt failed for {symbol}: {error} -- retrying in {backoff}s",
                     symbol=symbol,
                     error=str(exc),
                     backoff=backoff,

@@ -6,6 +6,9 @@ Parsed ticker snapshots are forwarded to a configurable callback.
 
 Includes exponential backoff reconnection logic with disconnect timeout
 handling via async callbacks wired by BotEngine.
+
+Uses direct WebSocket connections via ``core.binance_client`` instead
+of the ``python-binance`` wrapper.
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
-from binance import AsyncClient, BinanceSocketManager
+from core.binance_client import BinanceClient, ReconnectingWebSocket
 from loguru import logger
 
 from core.models import TickerData
@@ -40,21 +43,20 @@ class TickerStream:
     modules.
 
     Args:
-        client: An initialised ``binance.AsyncClient`` instance.
+        client: An initialised ``BinanceClient`` instance.
     """
 
-    def __init__(self, client: AsyncClient) -> None:
+    def __init__(self, client: BinanceClient) -> None:
         self._client = client
-        self._bm: BinanceSocketManager | None = None
-        self._socket: Any = None
+        self._socket: ReconnectingWebSocket | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._connected: bool = False
 
-        # Callback — set by BotEngine before calling connect().
+        # Callback -- set by BotEngine before calling connect().
         self.on_ticker_update: Callable[[list[TickerData]], Awaitable[None]] | None = None
 
-        # Reconnection callbacks — wired by BotEngine.
+        # Reconnection callbacks -- wired by BotEngine.
         # Called when disconnected > 60s so BotEngine can close positions.
         self.on_disconnect_timeout: Callable[[], Awaitable[None]] | None = None
         # Called on successful reconnect with disconnection duration in seconds.
@@ -66,10 +68,7 @@ class TickerStream:
             log.warning("TickerStream | Already connected, skipping")
             return
 
-        self._bm = BinanceSocketManager(self._client)
-        self._socket = self._bm.futures_multiplex_socket(
-            streams=["!ticker@arr"],
-        )
+        self._socket = ReconnectingWebSocket(self._client, streams=["!ticker@arr"])
         self._connected = True
         self._listen_task = asyncio.create_task(self._listen())
         self._listen_task.add_done_callback(self._on_task_done)
@@ -79,7 +78,7 @@ class TickerStream:
         """Close the WebSocket connection and cancel all background tasks."""
         self._connected = False
 
-        # Cancel the reconnect task first — it may be waiting on a sleep
+        # Cancel the reconnect task first -- it may be waiting on a sleep
         # or trying to re-create the listen task.
         if self._reconnect_task is not None:
             self._reconnect_task.cancel()
@@ -107,7 +106,6 @@ class TickerStream:
                 )
             self._socket = None
 
-        self._bm = None
         log.info("TickerStream | Disconnected")
 
     # ------------------------------------------------------------------
@@ -138,6 +136,7 @@ class TickerStream:
         ``disconnect()`` call), a reconnection loop is started
         automatically with exponential backoff.
         """
+        assert self._socket is not None
         try:
             async with self._socket as stream:
                 while self._connected:
@@ -162,7 +161,7 @@ class TickerStream:
             )
 
         # If we're still supposed to be connected, the disconnect was
-        # unexpected — start the reconnection loop.
+        # unexpected -- start the reconnection loop.
         if self._connected:
             log.warning("TickerStream | Unexpected disconnect, starting reconnection")
             self._reconnect_task = asyncio.create_task(
@@ -173,7 +172,7 @@ class TickerStream:
     async def _reconnect_loop(self) -> None:
         """Attempt to reconnect with exponential backoff.
 
-        Backoff schedule: 1s → 2s → 4s → 8s → 16s → 30s (max).
+        Backoff schedule: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (max).
         Calls ``on_disconnect_timeout`` once when disconnected > 60s.
         Calls ``on_reconnected`` with duration on successful reconnect.
         Resets backoff after a successful reconnection.
@@ -208,10 +207,7 @@ class TickerStream:
                         pass
                     self._socket = None
 
-                self._bm = BinanceSocketManager(self._client)
-                self._socket = self._bm.futures_multiplex_socket(
-                    streams=["!ticker@arr"],
-                )
+                self._socket = ReconnectingWebSocket(self._client, streams=["!ticker@arr"])
 
                 duration = time.monotonic() - disconnect_start
                 log.info(
@@ -235,7 +231,7 @@ class TickerStream:
 
             except Exception as exc:
                 log.warning(
-                    "TickerStream | Reconnection attempt failed: {error} — retrying in {backoff}s",
+                    "TickerStream | Reconnection attempt failed: {error} -- retrying in {backoff}s",
                     error=str(exc),
                     backoff=backoff,
                 )

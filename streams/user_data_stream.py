@@ -1,11 +1,21 @@
-"""Binance futures user-data stream for account/order reconciliation."""
+"""Binance futures user-data stream for account/order reconciliation.
+
+Listens to the Binance futures user-data WebSocket for ORDER_TRADE_UPDATE
+events, enabling reconciliation for exchange-side events that do not
+originate from the bot's local exit flow (especially protective stop-loss
+orders that fill directly on Binance).
+
+Uses direct WebSocket connections via ``core.binance_client`` instead
+of the ``python-binance`` wrapper.  Listen key management (create,
+keep-alive) is handled internally.
+"""
 from __future__ import annotations
 
 import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
-from binance import AsyncClient, BinanceSocketManager
+from core.binance_client import BinanceClient
 from loguru import logger
 
 from core.models import OrderUpdate
@@ -23,12 +33,14 @@ class UserDataStream:
     The main purpose is reconciliation for exchange-side events that do not
     originate from the bot's local exit flow, especially protective stop-loss
     orders that fill directly on Binance.
+
+    Args:
+        client: An initialised ``BinanceClient`` instance.
     """
 
-    def __init__(self, client: AsyncClient) -> None:
+    def __init__(self, client: BinanceClient) -> None:
         self._client = client
-        self._bm: BinanceSocketManager | None = None
-        self._socket: Any = None
+        self._ws_iter: Any = None
         self._listen_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
         self._connected = False
@@ -43,8 +55,8 @@ class UserDataStream:
             log.warning("UserDataStream | Already connected, skipping")
             return
 
-        self._bm = BinanceSocketManager(self._client)
-        self._socket = self._bm.futures_user_socket()
+        listen_key = await self._client.get_listen_key()
+        self._ws_iter = self._client.ws_connect(streams=[listen_key])
         self._connected = True
         self._listen_task = asyncio.create_task(self._listen())
         self._listen_task.add_done_callback(self._on_task_done)
@@ -70,17 +82,7 @@ class UserDataStream:
                 pass
             self._listen_task = None
 
-        if self._socket is not None:
-            try:
-                await self._socket.__aexit__(None, None, None)
-            except Exception as exc:
-                log.warning(
-                    "UserDataStream | Error closing socket: {error}",
-                    error=str(exc),
-                )
-            self._socket = None
-
-        self._bm = None
+        self._ws_iter = None
         log.info("UserDataStream | Disconnected")
 
     @staticmethod
@@ -97,21 +99,21 @@ class UserDataStream:
 
     async def _listen(self) -> None:
         """Read user-data messages and dispatch parsed order updates."""
+        assert self._ws_iter is not None
         try:
-            async with self._socket as stream:
-                while self._connected:
-                    try:
-                        msg = await stream.recv()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        log.warning(
-                            "UserDataStream | recv error: {error}",
-                            error=str(exc),
-                        )
-                        break
+            while self._connected:
+                try:
+                    msg = await self._ws_iter.__anext__()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning(
+                        "UserDataStream | recv error: {error}",
+                        error=str(exc),
+                    )
+                    break
 
-                    await self._handle_message(msg)
+                await self._handle_message(msg)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -148,15 +150,9 @@ class UserDataStream:
             await asyncio.sleep(backoff)
 
             try:
-                if self._socket is not None:
-                    try:
-                        await self._socket.__aexit__(None, None, None)
-                    except Exception:
-                        pass
-                    self._socket = None
-
-                self._bm = BinanceSocketManager(self._client)
-                self._socket = self._bm.futures_user_socket()
+                # Get a fresh listen key (may create new one if expired)
+                listen_key = await self._client.get_listen_key()
+                self._ws_iter = self._client.ws_connect(streams=[listen_key])
 
                 duration = time.monotonic() - disconnect_start
                 log.info(
@@ -176,7 +172,7 @@ class UserDataStream:
 
             except Exception as exc:
                 log.warning(
-                    "UserDataStream | Reconnection attempt failed: {error} — retrying in {backoff}s",
+                    "UserDataStream | Reconnection attempt failed: {error} -- retrying in {backoff}s",
                     error=str(exc),
                     backoff=backoff,
                 )

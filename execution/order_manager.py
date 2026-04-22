@@ -3,6 +3,9 @@
 Provides the OrderManager class that handles leverage setting, market order
 placement, and retry logic with exponential backoff for Binance USDT-M
 Perpetual Futures.
+
+Uses direct HTTP calls via ``core.binance_client.BinanceClient`` instead
+of the ``python-binance`` wrapper for lower latency.
 """
 from __future__ import annotations
 
@@ -11,8 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from binance import AsyncClient
-from binance.exceptions import BinanceAPIException
+from core.binance_client import BinanceClient, BinanceError
 from loguru import logger
 
 from core.config import EnvSettings
@@ -72,25 +74,26 @@ class OrderManager:
 
     def __init__(self, env: EnvSettings) -> None:
         self._env = env
-        self._client: AsyncClient | None = None
+        self._client: BinanceClient | None = None
 
     async def connect(self) -> None:
-        """Create and authenticate the AsyncClient connection.
+        """Create and authenticate the BinanceClient connection.
 
         Connects to demo or mainnet based on ``BINANCE_DEMO`` config.
         """
-        self._client = await AsyncClient.create(
+        self._client = BinanceClient(
             api_key=self._env.binance_api_key,
             api_secret=self._env.binance_api_secret,
             demo=self._env.binance_demo,
         )
+        await self._client.connect()
         mode = "demo" if self._env.binance_demo else "mainnet"
         logger.info("order | Connected to Binance {mode}", mode=mode)
 
     async def close(self) -> None:
-        """Close the AsyncClient connection."""
+        """Close the BinanceClient connection."""
         if self._client:
-            await self._client.close_connection()
+            await self._client.close()
             self._client = None
             logger.info("order | Disconnected from Binance")
 
@@ -102,7 +105,7 @@ class OrderManager:
             leverage: Leverage multiplier to set.
 
         Raises:
-            BinanceAPIException: If all retry attempts fail.
+            BinanceError: If all retry attempts fail.
         """
         async def _do_set_leverage() -> Any:
             assert self._client is not None
@@ -116,7 +119,7 @@ class OrderManager:
             _do_set_leverage,
         )
         logger.info(
-            "order | Leverage set: {symbol} → {leverage}x",
+            "order | Leverage set: {symbol} -> {leverage}x",
             symbol=symbol,
             leverage=leverage,
         )
@@ -234,7 +237,7 @@ class OrderManager:
             OrderResult with fill details.
 
         Raises:
-            BinanceAPIException: If all retry attempts fail.
+            BinanceError: If all retry attempts fail.
         """
         raw = await self._create_order_with_retry(
             f"open_position({symbol}, {side.value}, {quantity})",
@@ -244,6 +247,7 @@ class OrderManager:
                 "side": side.value,
                 "type": "MARKET",
                 "quantity": quantity,
+                "newOrderRespType": "RESULT",
             },
         )
         raw = await self._resolve_market_order(symbol, raw)
@@ -265,7 +269,7 @@ class OrderManager:
     ) -> OrderResult:
         """Place a market order to close (reduce) a position.
 
-        The ``side`` should be the closing side — BUY to close a SHORT,
+        The ``side`` should be the closing side -- BUY to close a SHORT,
         SELL to close a LONG.
 
         Args:
@@ -277,7 +281,7 @@ class OrderManager:
             OrderResult with fill details.
 
         Raises:
-            BinanceAPIException: If all retry attempts fail.
+            BinanceError: If all retry attempts fail.
         """
         raw = await self._create_order_with_retry(
             f"close_position({symbol}, {side.value}, {quantity})",
@@ -288,6 +292,7 @@ class OrderManager:
                 "type": "MARKET",
                 "quantity": quantity,
                 "reduceOnly": "true",
+                "newOrderRespType": "RESULT",
             },
         )
         raw = await self._resolve_market_order(symbol, raw)
@@ -501,10 +506,10 @@ class OrderManager:
                 raw = await self._client.futures_create_order(**order_params)
                 raw.setdefault("clientOrderId", client_order_id)
                 return raw
-            except BinanceAPIException as exc:
+            except BinanceError as exc:
                 if exc.status_code == 401:
                     logger.critical(
-                        "order | API key invalid — cannot continue: {err}",
+                        "order | API key invalid -- cannot continue: {err}",
                         err=str(exc),
                     )
                     raise
@@ -530,7 +535,7 @@ class OrderManager:
 
                 backoff = self._retry_delay(exc, attempt)
                 logger.warning(
-                    "order | {op} attempt {a}/{n} failed: {err} — retrying in {b}s",
+                    "order | {op} attempt {a}/{n} failed: {err} -- retrying in {b}s",
                     op=operation,
                     a=attempt,
                     n=MAX_RETRIES,
@@ -560,7 +565,7 @@ class OrderManager:
 
                 backoff = 2 ** (attempt - 1)
                 logger.warning(
-                    "order | {op} attempt {a}/{n} unexpected error — retrying in {b}s",
+                    "order | {op} attempt {a}/{n} unexpected error -- retrying in {b}s",
                     op=operation,
                     a=attempt,
                     n=MAX_RETRIES,
@@ -674,16 +679,10 @@ class OrderManager:
         return f"csb_{uuid.uuid4().hex[:28]}"
 
     @staticmethod
-    def _retry_delay(exc: BinanceAPIException, attempt: int) -> int | float:
+    def _retry_delay(exc: BinanceError, attempt: int) -> int | float:
         """Return retry delay for Binance API errors."""
         if exc.status_code != 429:
             return 2 ** (attempt - 1)
-
-        if hasattr(exc, "response") and exc.response is not None:
-            try:
-                return int(exc.response.headers.get("Retry-After", attempt))
-            except (TypeError, ValueError):
-                return attempt
         return attempt
 
     async def _execute_with_retry(
@@ -704,28 +703,24 @@ class OrderManager:
             The result of the successful call.
 
         Raises:
-            BinanceAPIException: On non-retryable errors or after all retries.
+            BinanceError: On non-retryable errors or after all retries.
             Exception: On unexpected errors after all retries.
         """
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return await func()
-            except BinanceAPIException as exc:
-                # Auth failure — not retryable
+            except BinanceError as exc:
+                # Auth failure -- not retryable
                 if exc.status_code == 401:
                     logger.critical(
-                        "order | API key invalid — cannot continue: {err}",
+                        "order | API key invalid -- cannot continue: {err}",
                         err=str(exc),
                     )
                     raise
 
-                # Rate limited — respect Retry-After if present
+                # Rate limited -- respect Retry-After if present
                 if exc.status_code == 429:
-                    retry_after = attempt  # sensible default
-                    if hasattr(exc, "response") and exc.response is not None:
-                        retry_after = int(
-                            exc.response.headers.get("Retry-After", attempt)
-                        )
+                    retry_after = attempt
                     logger.warning(
                         "order | Rate limited on {op}, waiting {s}s",
                         op=operation,
@@ -745,7 +740,7 @@ class OrderManager:
 
                 backoff = 2 ** (attempt - 1)  # 1s, 2s, 4s
                 logger.warning(
-                    "order | {op} attempt {a}/{n} failed: {err} — retrying in {b}s",
+                    "order | {op} attempt {a}/{n} failed: {err} -- retrying in {b}s",
                     op=operation,
                     a=attempt,
                     n=MAX_RETRIES,
@@ -765,7 +760,7 @@ class OrderManager:
 
                 backoff = 2 ** (attempt - 1)
                 logger.warning(
-                    "order | {op} attempt {a}/{n} unexpected error — retrying in {b}s",
+                    "order | {op} attempt {a}/{n} unexpected error -- retrying in {b}s",
                     op=operation,
                     a=attempt,
                     n=MAX_RETRIES,

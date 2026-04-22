@@ -278,10 +278,10 @@ class TestReconnectTaskTracking:
         mock_socket.__aenter__ = AsyncMock(return_value=mock_stream)
         mock_socket.__aexit__ = AsyncMock(return_value=None)
 
-        mock_bm = MagicMock()
-        mock_bm.futures_multiplex_socket.return_value = mock_socket
+        def _fake_ws(client, streams):
+            return mock_socket
 
-        with patch("streams.ticker_stream.BinanceSocketManager", return_value=mock_bm):
+        with patch("streams.ticker_stream.ReconnectingWebSocket", _fake_ws):
             with patch("streams.ticker_stream.asyncio.sleep", new_callable=AsyncMock):
                 # Run reconnect loop — it should succeed on first attempt
                 await stream._reconnect_loop()

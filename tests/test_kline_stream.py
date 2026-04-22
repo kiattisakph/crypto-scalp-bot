@@ -289,19 +289,16 @@ class TestSubscriptionTracking:
 
     @pytest.mark.asyncio
     async def test_subscribe_adds_symbol(self, stream: KlineStream) -> None:
-        # We need to mock BinanceSocketManager to avoid real connections
+        # We need to mock ReconnectingWebSocket to avoid real connections
         with pytest.MonkeyPatch.context() as mp:
-            mock_bm_instance = MagicMock()
             mock_socket = MagicMock()
-            # Make the socket's async context manager work
             mock_socket.__aenter__ = AsyncMock(return_value=mock_socket)
             mock_socket.__aexit__ = AsyncMock(return_value=None)
             mock_socket.recv = AsyncMock(side_effect=Exception("test stop"))
-            mock_bm_instance.futures_multiplex_socket.return_value = mock_socket
 
             mp.setattr(
-                "streams.kline_stream.BinanceSocketManager",
-                lambda client: mock_bm_instance,
+                "streams.kline_stream.ReconnectingWebSocket",
+                lambda client, streams: mock_socket,
             )
 
             await stream.subscribe("SOLUSDT")
@@ -331,29 +328,28 @@ class TestConfigDrivenTimeframes:
         mock_client = MagicMock()
         stream = KlineStream(mock_client, timeframes=["5m", "1h"])
 
-        with pytest.MonkeyPatch.context() as mp:
-            mock_bm_instance = MagicMock()
+        captured_streams: list[str] = []
+
+        def _fake_ws(client, streams):
+            captured_streams.extend(streams)
             mock_socket = MagicMock()
             mock_socket.__aenter__ = AsyncMock(return_value=mock_socket)
             mock_socket.__aexit__ = AsyncMock(return_value=None)
             mock_socket.recv = AsyncMock(side_effect=Exception("test stop"))
-            mock_bm_instance.futures_multiplex_socket.return_value = mock_socket
+            return mock_socket
 
+        with pytest.MonkeyPatch.context() as mp:
             mp.setattr(
-                "streams.kline_stream.BinanceSocketManager",
-                lambda client: mock_bm_instance,
+                "streams.kline_stream.ReconnectingWebSocket",
+                _fake_ws,
             )
 
             await stream.subscribe("SOLUSDT")
 
-            # Verify the stream names passed to futures_multiplex_socket
-            mock_bm_instance.futures_multiplex_socket.assert_called_once()
-            call_kwargs = mock_bm_instance.futures_multiplex_socket.call_args
-            actual_streams = call_kwargs[1].get("streams") or call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1]["streams"]
-            assert "solusdt@kline_5m" in actual_streams
-            assert "solusdt@kline_1h" in actual_streams
-            assert "solusdt@kline_3m" not in actual_streams
-            assert "solusdt@kline_15m" not in actual_streams
+            assert "solusdt@kline_5m" in captured_streams
+            assert "solusdt@kline_1h" in captured_streams
+            assert "solusdt@kline_3m" not in captured_streams
+            assert "solusdt@kline_15m" not in captured_streams
 
             await stream.unsubscribe("SOLUSDT")
 

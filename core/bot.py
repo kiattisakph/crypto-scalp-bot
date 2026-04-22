@@ -11,9 +11,9 @@ import signal
 from datetime import datetime
 from typing import Any
 
-from binance import AsyncClient
 from loguru import logger
 
+from core.binance_client import BinanceClient
 from core.config import AppConfig, EnvSettings, load_config
 from core.enums import ExitReason, OrderSide, SignalDirection
 from core.logging_setup import setup_logging
@@ -162,7 +162,7 @@ class BotEngine:
 
         # --- 7. Create stream components ---
         assert self._order_manager._client is not None
-        client = self._order_manager._client
+        client: BinanceClient = self._order_manager._client
 
         self._ticker_stream = TickerStream(client)
         self._user_data_stream = UserDataStream(client)
@@ -1026,7 +1026,7 @@ class BotEngine:
         assert self._order_manager is not None
         assert self._order_manager._client is not None
 
-        client = self._order_manager._client
+        client: BinanceClient = self._order_manager._client
         timeframes = [
             self._config.strategy.signal_timeframe,
             self._config.strategy.trend_timeframe,
@@ -1052,7 +1052,7 @@ class BotEngine:
 
     @staticmethod
     async def _fetch_rest_klines(
-        client: AsyncClient,
+        client: BinanceClient,
         symbol: str,
         interval: str,
         limit: int,
@@ -1064,7 +1064,7 @@ class BotEngine:
         the final entry.
 
         Args:
-            client: An initialised ``binance.AsyncClient``.
+            client: A ``BinanceClient`` instance.
             symbol: Trading pair symbol (e.g. ``"SOLUSDT"``).
             interval: Kline interval string (e.g. ``"3m"``, ``"15m"``).
             limit: Maximum number of closed candles to return.

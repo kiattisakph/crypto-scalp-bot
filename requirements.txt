@@ -1,5 +1,6 @@
-# Exchange SDK
-python-binance==1.0.36
+# Exchange SDK (direct HTTP + WebSocket)
+httpx==0.28.1
+websockets>=13.0
 
 # Data & Indicators
 pandas==2.3.2
@@ -16,9 +17,6 @@ pyyaml==6.0.2
 
 # Logging
 loguru==0.7.3
-
-# HTTP (Telegram)
-httpx==0.28.1
 
 # Testing
 pytest==8.3.4
