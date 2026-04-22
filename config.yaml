@@ -1,0 +1,66 @@
+watchlist:
+  top_n: 5
+  min_change_pct_24h: 3.0
+  min_volume_usdt_24h: 10000000
+  refresh_interval_sec: 300
+  max_concurrent_positions: 3
+  blacklist:
+    - "USDCUSDT"
+    - "BUSDUSDT"
+    - "BTCDOMUSDT"
+  blacklist_patterns:
+    - "UP"
+    - "DOWN"
+
+strategy:
+  signal_timeframe: "3m"
+  trend_timeframe: "15m"
+  candle_buffer_size: 100
+
+  entry:
+    rsi_period: 14
+    atr_period: 14
+    adx_period: 14
+    adx_trend_threshold: 20.0
+    rsi_long_min: 50
+    rsi_long_max: 70
+    rsi_short_min: 30
+    rsi_short_max: 50
+    ema_fast: 9
+    ema_slow: 21
+    ema_trend_fast: 20
+    ema_trend_slow: 50
+    volume_multiplier: 1.5
+    resistance_buffer_pct: 0.3
+    signal_cooldown_min: 15
+
+    # Funding rate filter — skip trades when funding is extreme or against position
+    max_funding_rate_pct: 0.05             # reject if |funding| > 0.05%
+    reject_funding_against_position: true  # skip LONG on positive funding, SHORT on negative
+
+  exit:
+    # ATR-based mode (recommended) — TP/SL auto-scale to coin volatility
+    atr_mode: true
+    atr_tp1_mult: 0.8
+    atr_tp2_mult: 1.5
+    atr_tp3_mult: 2.5
+    atr_sl_mult: 1.0
+    atr_trailing_mult: 0.5
+    # Fallback fixed % (used only when atr_mode: false)
+    tp1_pct: 0.8
+    tp2_pct: 1.5
+    tp3_pct: 2.5
+    tp1_close_ratio: 0.4
+    tp2_close_ratio: 0.4
+    trailing_stop_pct: 0.5
+    sl_pct: 1.0
+    max_hold_min: 30
+
+risk:
+  risk_per_trade_pct: 1.0
+  leverage: 5
+  max_concurrent_positions: 3
+  max_daily_loss_pct: 3.0
+  max_drawdown_pct: 5.0
+  min_free_margin_pct: 30.0
+  reconciliation_interval_sec: 30

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile backtest/__init__.py)",
+      "Bash(python -m py_compile backtest/data_fetcher.py)",
+      "Bash(python -m py_compile backtest/report.py)"
+    ]
+  }
+}

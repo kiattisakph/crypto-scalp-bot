@@ -1,0 +1,354 @@
+# Implementation Plan: crypto-scalp-bot
+
+## Overview
+
+Build an automated scalping bot for Binance USDT-M Perpetual Futures using Python 3.11 async architecture. Implementation proceeds bottom-up: foundation (config, enums, database), then core components (candle buffer, signal engine, watchlist, risk guard), then execution layer (order/position managers), then strategy orchestration, and finally integration wiring with the entry point. Each task builds on the previous, ensuring no orphaned code.
+
+## Tasks
+
+- [x] 1. Set up project foundation and dependencies
+  - [x] 1.1 Create `requirements.txt` with all dependencies
+    - Include: python-binance, pandas, pandas_ta, numpy, aiosqlite, pydantic-settings, pyyaml, loguru, httpx (for Telegram), pytest, pytest-asyncio, hypothesis
+    - _Requirements: 1.1, 1.2_
+  - [x] 1.2 Create `.env.example` template and `config.yaml` with default values
+    - `.env.example` with placeholder keys for BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DB_PATH, LOG_LEVEL
+    - `config.yaml` with all watchlist, strategy, and risk parameters from the requirements
+    - _Requirements: 1.1, 1.2_
+  - [x] 1.3 Create `core/enums.py` with all enum definitions
+    - Define `SignalDirection`, `OrderSide`, `ExitReason`, `PositionStatus` enums as specified in the design data models section
+    - _Requirements: 6.3, 6.4, 8.1, 10.3_
+  - [x] 1.4 Create `core/config.py` with pydantic-settings configuration loading
+    - Implement `EnvSettings` (BaseSettings from `.env`), `WatchlistConfig`, `EntryConfig`, `ExitConfig`, `RiskConfig`, `StrategyConfig`, `AppConfig` pydantic models
+    - Implement `load_config() -> tuple[EnvSettings, AppConfig]` that loads `.env` and `config.yaml`, validates, and returns both config objects
+    - Raise `SystemExit` on validation failure with logged error details
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
+  - [x] 1.5 Write property test for configuration validation (Property 1)
+    - **Property 1: Configuration validation accepts valid configs and rejects invalid configs**
+    - Use hypothesis to generate valid and invalid config dictionaries
+    - Verify valid configs produce `AppConfig` objects, invalid configs raise validation errors
+    - **Validates: Requirements 1.3, 1.4**
+
+- [x] 2. Implement data models and database layer
+  - [x] 2.1 Create data model dataclasses in a shared `core/models.py` module
+    - Define `TickerData`, `Signal`, `Position`, `TradeRecord`, `ExitData`, `TradeResult`, `RiskCheckResult`, `DailyStats` dataclasses as specified in the design
+    - _Requirements: 6.5, 8.1, 8.8, 9.1, 10.1_
+  - [x] 2.2 Create `storage/database.py` with SQLite connection management
+    - Implement `Database` class with `async init()` that creates `trades` and `daily_stats` tables if they don't exist using the schema from the design
+    - Implement `async get_connection()` and `async close()` methods
+    - Use `aiosqlite` for all database operations
+    - _Requirements: 10.4_
+  - [x] 2.3 Create `storage/trade_repository.py` with CRUD operations
+    - Implement `async insert_trade(trade: TradeRecord) -> int` — inserts open trade, returns ID
+    - Implement `async close_trade(trade_id: int, exit_data: ExitData) -> None` — updates trade with exit info and status CLOSED
+    - Implement `async update_daily_stats(date: str, pnl: float, is_win: bool) -> None`
+    - Implement `async get_daily_stats(date: str) -> DailyStats | None`
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
+  - [x] 2.4 Write unit tests for TradeRepository
+    - Test insert_trade, close_trade, update_daily_stats, get_daily_stats using in-memory SQLite
+    - Test edge cases: closing non-existent trade, getting stats for non-existent date
+    - _Requirements: 10.1, 10.2, 10.5_
+
+- [x] 3. Implement utility modules
+  - [x] 3.1 Create `utils/time_utils.py` with timezone helpers
+    - Implement UTC datetime helpers: `utc_now()`, `minutes_elapsed(since: datetime) -> float`
+    - _Requirements: 8.7_
+  - [x] 3.2 Create `utils/candle_buffer.py` with rolling candle buffer
+    - Implement `CandleBuffer` class with configurable `max_size`
+    - Implement `add(symbol, timeframe, candle)` — appends candle, evicts oldest if at capacity
+    - Implement `get_df(symbol, timeframe) -> pd.DataFrame` — returns DataFrame with columns: open, high, low, close, volume, timestamp in chronological order
+    - Implement `has_enough_data(symbol, timeframe, min_candles) -> bool`
+    - Implement `clear(symbol)` — removes all data for a symbol
+    - Use `asyncio.Lock` for concurrent access safety
+    - _Requirements: 5.1, 5.2, 5.3, 5.4_
+  - [x] 3.3 Write property test for CandleBuffer (Property 7)
+    - **Property 7: CandleBuffer size invariant and FIFO ordering**
+    - Use hypothesis to generate sequences of candle additions with varying max_size
+    - Verify buffer never exceeds max_size, oldest candle is evicted at capacity, DataFrame has correct columns and chronological order
+    - **Validates: Requirements 5.1, 5.2, 5.3**
+  - [x] 3.4 Write unit tests for CandleBuffer
+    - Test add/get_df with known candle data, test capacity eviction, test has_enough_data, test clear
+    - Test empty buffer returns empty DataFrame with correct columns
+    - _Requirements: 5.1, 5.2, 5.3, 5.4_
+
+- [x] 4. Checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 5. Implement notification module
+  - [x] 5.1 Create `notification/telegram_alert.py` with Telegram Bot API integration
+    - Implement `TelegramAlert` class with `async send(message: str) -> None` that sends via HTTP POST to Telegram Bot API
+    - Log failure without raising on API errors — bot operation must not be interrupted
+    - Implement helper methods: `notify_started()`, `notify_stopped()`, `notify_watchlist_changed(added, removed)`, `notify_position_opened(...)`, `notify_position_closed(...)`, `notify_risk_halt(reason, value)`, `notify_reconnected(duration_sec)`
+    - Format messages with emoji prefixes as specified in requirements section 7
+    - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5_
+  - [x] 5.2 Write property test for position opened notification (Property 20)
+    - **Property 20: Position opened notification completeness**
+    - Use hypothesis to generate valid position data (symbol, direction, entry_price, quantity, sl_price, tp1_price)
+    - Verify the formatted message contains all required fields: symbol, direction, entry price, position size, stop loss price, TP1 target price
+    - **Validates: Requirements 11.2**
+  - [x] 5.3 Write property test for position closed notification (Property 21)
+    - **Property 21: Position closed notification completeness**
+    - Use hypothesis to generate valid trade result data (symbol, exit_reason, pnl_usdt)
+    - Verify the formatted message contains: symbol, exit reason, PnL in USDT
+    - **Validates: Requirements 11.3**
+
+- [x] 6. Implement logging setup
+  - [x] 6.1 Create logging configuration in `core/logging_setup.py`
+    - Configure loguru to output to console and `logs/bot.log` with 10MB rotation and 7-day retention
+    - Configure separate `logs/trades.log` sink for trade-specific events
+    - Set log level from `LOG_LEVEL` environment variable
+    - Log format: `{time:YYYY-MM-DD HH:mm:ss} | {level} | {extra[component]} | {message}` (UTC timestamps)
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5_
+
+- [x] 7. Implement risk management
+  - [x] 7.1 Create `risk/risk_guard.py` with portfolio-level risk enforcement
+    - Implement `RiskGuard` class with config-driven thresholds (all values from `RiskConfig` and `ExitConfig`)
+    - Implement `async load_daily_state()` — loads daily stats from TradeRepository
+    - Implement `check_trade(entry_price: float, balance: float) -> RiskCheckResult` — checks all 4 conditions (daily_loss, session_drawdown, open_positions, free_margin) and calculates position_size using the exact formula: `risk_amount = balance * risk_per_trade_pct / 100`, `sl_distance = entry_price * sl_pct / 100`, `position_size = risk_amount / sl_distance`
+    - Implement `record_pnl(pnl_usdt: float) -> None` — updates daily loss and session drawdown tracking
+    - Implement `is_halted() -> bool` — returns True if daily loss or session drawdown limits exceeded
+    - On halt trigger, log the specific condition and notify via TelegramAlert
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+  - [x] 7.2 Write property test for position size formula (Property 17)
+    - **Property 17: Position size formula**
+    - Use hypothesis to generate positive balance, positive entry_price, valid risk_per_trade_pct > 0, sl_pct > 0
+    - Verify position_size = (balance × risk_per_trade_pct / 100) / (entry_price × sl_pct / 100) and result is always positive finite
+    - **Validates: Requirements 9.1**
+  - [x] 7.3 Write property test for risk approval/rejection (Property 18)
+    - **Property 18: Risk approval/rejection correctness**
+    - Use hypothesis to generate risk states (daily_loss, session_drawdown, open_position_count, free_margin_pct) and risk config
+    - Verify trade approved iff ALL conditions pass; when rejected, result identifies the specific failing condition
+    - **Validates: Requirements 9.2, 9.3**
+  - [x] 7.4 Write property test for risk halt trigger (Property 19)
+    - **Property 19: Risk halt trigger**
+    - Use hypothesis to generate daily_loss and session_drawdown values exceeding thresholds
+    - Verify RiskGuard enters halted state and rejects all subsequent trades
+    - **Validates: Requirements 9.4, 9.5**
+  - [x] 7.5 Write unit tests for RiskGuard
+    - Test position size calculation with known values
+    - Test each risk check condition individually (daily loss, drawdown, concurrent positions, free margin)
+    - Test halt state transitions and persistence
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
+
+- [x] 8. Checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 9. Implement watchlist management
+  - [x] 9.1 Create `strategy/watchlist_manager.py` with dynamic symbol selection
+    - Implement `WatchlistManager` class with config-driven filter rules
+    - Implement `update_tickers(tickers: list[TickerData])` — stores latest ticker snapshot
+    - Implement `async refresh()` — filters symbols (USDT suffix, not blacklisted, not matching blacklist_patterns, min_change_pct_24h, min_volume_usdt_24h, last_price > 0.0001), sorts by price_change_pct DESC, selects top_n
+    - Implement grace policy: symbols with open positions retained regardless of ranking
+    - Implement `get_active_symbols() -> list[str]` and `has_open_position(symbol) -> bool`
+    - Emit `on_watchlist_changed(added, removed)` callback when list changes
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11_
+  - [x] 9.2 Write property test for watchlist filter correctness (Property 2)
+    - **Property 2: Watchlist filter correctness**
+    - Use hypothesis to generate ticker data sets and filter configurations
+    - Verify every symbol in output satisfies ALL filter criteria and no qualifying symbol is excluded
+    - **Validates: Requirements 3.2, 3.3, 3.4, 3.5, 3.6, 3.7**
+  - [x] 9.3 Write property test for watchlist top-N sorting (Property 3)
+    - **Property 3: Watchlist top-N sorting**
+    - Use hypothesis to generate qualifying symbol lists and top_n values
+    - Verify output is sorted by price_change_pct DESC and length is min(len(qualifying), top_n)
+    - **Validates: Requirements 3.8**
+  - [x] 9.4 Write property test for grace policy retention (Property 4)
+    - **Property 4: Grace policy retention**
+    - Use hypothesis to generate watchlist states where some symbols have open positions
+    - Verify symbols with open positions remain in watchlist regardless of ranking
+    - **Validates: Requirements 3.9**
+  - [x] 9.5 Write property test for watchlist change diff (Property 5)
+    - **Property 5: Watchlist change diff correctness**
+    - Use hypothesis to generate old and new watchlist sets
+    - Verify added = new - old and removed = old - new (excluding grace policy symbols)
+    - **Validates: Requirements 3.10**
+  - [x] 9.6 Write unit tests for WatchlistManager
+    - Test filter rules with known ticker data, test blacklist and pattern exclusion
+    - Test grace policy with mock position manager, test watchlist change event emission
+    - _Requirements: 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [x] 10. Implement signal engine
+  - [x] 10.1 Create `strategy/signal_engine.py` with indicator calculation and signal generation
+    - Implement `SignalEngine` class with config-driven indicator parameters
+    - Implement `evaluate(symbol, df_3m, df_15m) -> Signal | None`
+    - Calculate 15m indicators: EMA(20), EMA(50) using pandas_ta
+    - Calculate 3m indicators: RSI(14), EMA(9), EMA(21), 20-period volume MA using pandas_ta
+    - Implement LONG entry logic: all 6 conditions must be true simultaneously (15m trend, RSI range, EMA crossover within 2 candles, volume spike, bullish candle, resistance buffer)
+    - Implement SHORT entry logic: all 6 conditions must be true simultaneously (15m trend, RSI range, EMA crossover within 2 candles, volume spike, bearish candle, support buffer)
+    - Return `Signal(direction, confidence, indicators)` with snapshot of all indicator values, or None if conditions not met
+    - Handle insufficient data (return None) and NaN indicator values (return None with warning log)
+    - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
+  - [x] 10.2 Write property test for LONG signal generation (Property 8)
+    - **Property 8: LONG signal generation**
+    - Use hypothesis to generate 3m and 15m DataFrames where all LONG conditions are true
+    - Verify SignalEngine returns Signal with direction=LONG, confidence > 0, non-empty indicators dict
+    - **Validates: Requirements 6.3, 6.5**
+  - [x] 10.3 Write property test for SHORT signal generation (Property 9)
+    - **Property 9: SHORT signal generation**
+    - Use hypothesis to generate 3m and 15m DataFrames where all SHORT conditions are true
+    - Verify SignalEngine returns Signal with direction=SHORT, confidence > 0, non-empty indicators dict
+    - **Validates: Requirements 6.4, 6.5**
+  - [x] 10.4 Write unit tests for SignalEngine
+    - Test with known indicator values that should produce LONG/SHORT/no signal
+    - Test edge cases: RSI exactly at boundaries (50, 70, 30), insufficient candle data, NaN indicators
+    - Test EMA crossover detection within 2-candle window
+    - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
+
+- [x] 11. Checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 12. Implement execution layer
+  - [x] 12.1 Create `execution/order_manager.py` with Binance REST API wrapper
+    - Implement `OrderManager` class using `python-binance` AsyncClient
+    - Implement `async set_leverage(symbol, leverage)` with retry logic
+    - Implement `async open_position(symbol, side, quantity) -> OrderResult` — places market order
+    - Implement `async close_position(symbol, side, quantity) -> OrderResult` — places closing market order
+    - Implement retry logic: up to 3 retries with exponential backoff (1s, 2s, 4s) on API errors
+    - Support testnet/mainnet switching via `BINANCE_TESTNET` config flag
+    - _Requirements: 7.1, 7.2, 7.3, 7.4_
+  - [x] 12.2 Create `execution/position_manager.py` with TP/SL management
+    - Implement `PositionManager` class tracking open positions in memory
+    - Implement `open(symbol, side, entry_price, quantity, leverage) -> Position` — calculates TP1/TP2/TP3/SL levels using config percentages: TP = entry × (1 ± tp_pct/100), SL = entry × (1 ∓ sl_pct/100)
+    - Implement `async check_exits(symbol, current_price)` — evaluates exit conditions in order: SL → TP1 (partial close + breakeven) → TP2 (partial close) → TP3 (trailing activation) → trailing stop → time-based force close
+    - On TP1 hit: close `tp1_close_ratio` of quantity AND move SL to entry price (breakeven) — mandatory per risk rules
+    - On TP2 hit: close `tp2_close_ratio` of original quantity
+    - On TP3 hit: activate trailing stop at `trailing_stop_pct` from highest/lowest price
+    - On SL hit: close entire remaining position
+    - On max_hold_min exceeded: force close entire remaining position
+    - Implement `get_open_positions()`, `has_position(symbol)`, `on_position_closed` callback
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8_
+  - [ ]* 12.3 Write property test for TP/SL level calculation (Property 11)
+    - **Property 11: TP/SL level calculation**
+    - Use hypothesis to generate entry_price > 0 and trade direction (LONG/SHORT)
+    - Verify TP1/TP2/TP3/SL calculated correctly: TP = entry × (1 ± tp_pct/100), SL = entry × (1 ∓ sl_pct/100)
+    - **Validates: Requirements 8.1**
+  - [ ]* 12.4 Write property test for TP1 partial close and breakeven (Property 12)
+    - **Property 12: TP1 partial close and breakeven**
+    - Use hypothesis to generate positions where price reaches TP1
+    - Verify exactly tp1_close_ratio fraction closed AND SL moved to entry price
+    - **Validates: Requirements 8.2, 8.3**
+  - [ ]* 12.5 Write property test for TP2 partial close (Property 13)
+    - **Property 13: TP2 partial close**
+    - Use hypothesis to generate positions where TP1 already hit and price reaches TP2
+    - Verify exactly tp2_close_ratio fraction of original quantity closed
+    - **Validates: Requirements 8.4**
+  - [ ]* 12.6 Write property test for TP3 trailing stop (Property 14)
+    - **Property 14: TP3 trailing stop activation**
+    - Use hypothesis to generate positions where TP2 already hit and price reaches TP3
+    - Verify trailing stop activated at trailing_stop_pct from highest/lowest price
+    - **Validates: Requirements 8.5**
+  - [ ]* 12.7 Write property test for stop loss full close (Property 15)
+    - **Property 15: Stop loss full close**
+    - Use hypothesis to generate positions where price reaches SL
+    - Verify entire remaining position quantity is closed
+    - **Validates: Requirements 8.6**
+  - [ ]* 12.8 Write property test for time-based force close (Property 16)
+    - **Property 16: Time-based force close**
+    - Use hypothesis to generate positions with elapsed time exceeding max_hold_min
+    - Verify entire remaining position force closed regardless of price or TP/SL state
+    - **Validates: Requirements 8.7**
+  - [ ]* 12.9 Write unit tests for PositionManager
+    - Test TP/SL level calculation with known entry prices for LONG and SHORT
+    - Test partial close ratios at TP1 and TP2
+    - Test breakeven SL move after TP1
+    - Test trailing stop activation and trigger
+    - Test force close at max hold time
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7_
+
+- [x] 13. Checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 14. Implement WebSocket streams
+  - [x] 14.1 Create `streams/ticker_stream.py` with market-wide ticker subscription
+    - Implement `TickerStream` class using python-binance WebSocket manager
+    - Implement `async connect()` — opens WebSocket to `!ticker@arr`
+    - Implement `async disconnect()` — closes the WebSocket connection
+    - Invoke `on_ticker_update` callback with parsed `list[TickerData]` on each message
+    - Handle malformed messages: log warning, skip, do not crash
+    - _Requirements: 3.1, 12.1, 12.2_
+  - [x] 14.2 Create `streams/kline_stream.py` with per-symbol kline subscriptions
+    - Implement `KlineStream` class with dynamic subscribe/unsubscribe
+    - Implement `async subscribe(symbol)` — subscribes to `{symbol}@kline_3m` and `{symbol}@kline_15m`
+    - Implement `async unsubscribe(symbol)` — unsubscribes from both kline streams
+    - Forward closed candles only (field `x` is `true`) to `on_candle_closed` callback
+    - Maintain subscriptions for symbols with open positions even if removed from watchlist
+    - Handle malformed messages: log warning, skip, do not crash
+    - _Requirements: 4.1, 4.2, 4.3, 4.4_
+  - [ ]* 14.3 Write property test for closed candle forwarding (Property 6)
+    - **Property 6: Closed candle forwarding**
+    - Use hypothesis to generate kline messages with x=true and x=false
+    - Verify only messages with x=true are forwarded to CandleBuffer
+    - **Validates: Requirements 4.3**
+  - [ ]* 14.4 Write unit tests for KlineStream candle forwarding
+    - Test that closed candles (x=true) are forwarded and open candles (x=false) are not
+    - Test subscribe/unsubscribe tracking
+    - _Requirements: 4.1, 4.2, 4.3_
+
+- [x] 15. Implement strategy orchestrator
+  - [x] 15.1 Create `strategy/top_gainers_scalping.py` with strategy coordination
+    - Implement `TopGainersScalping` class that wires WatchlistManager, SignalEngine, RiskGuard, OrderManager, PositionManager, CandleBuffer, TelegramAlert
+    - Implement `async start()` — begins listening for candle close events, starts watchlist refresh timer
+    - Implement `async stop()` — stops the strategy loop
+    - Implement `async on_candle_closed(symbol, timeframe)` — gets DataFrames from CandleBuffer, evaluates signal via SignalEngine, checks risk via RiskGuard, places order via OrderManager if approved
+    - Implement cooldown tracking per symbol: suppress signals for `signal_cooldown_min` minutes after entry
+    - Implement `async close_all_positions()` — force-closes all open positions (for shutdown/halt)
+    - On position closed: record PnL in RiskGuard, save to TradeRepository, send TelegramAlert
+    - _Requirements: 7.1, 7.2, 7.3, 7.5, 7.6, 8.8_
+  - [ ]* 15.2 Write property test for cooldown suppression (Property 10)
+    - **Property 10: Cooldown suppression**
+    - Use hypothesis to generate symbol cooldown states with varying elapsed times
+    - Verify signals suppressed during active cooldown and allowed after expiry
+    - **Validates: Requirements 7.5**
+  - [ ]* 15.3 Write unit tests for TopGainersScalping
+    - Test signal-to-order flow with mocked dependencies
+    - Test cooldown enforcement per symbol
+    - Test close_all_positions behavior
+    - _Requirements: 7.1, 7.5, 7.6_
+
+- [x] 16. Implement WebSocket reconnection logic
+  - [x] 16.1 Add reconnection handling to TickerStream and KlineStream
+    - Implement exponential backoff reconnection: 1s → 2s → 4s → 8s → 16s → 30s (max)
+    - On successful reconnect: re-subscribe to all previously active streams, send Telegram reconnection alert with disconnection duration
+    - If disconnected > 60 seconds: close all open positions via OrderManager, send Telegram alert, continue reconnection attempts
+    - Handle malformed messages: log warning, skip, do not crash
+    - _Requirements: 12.1, 12.2, 12.3, 12.4_
+
+- [x] 17. Implement BotEngine and entry point
+  - [x] 17.1 Create `core/bot.py` with BotEngine lifecycle management
+    - Implement `BotEngine` class that initializes and wires all components
+    - Implement `async start()`: load config → init database → load daily risk state → connect TickerStream → start StrategyOrchestrator → send "Bot started" Telegram alert
+    - Implement `async stop()`: close all positions → disconnect KlineStream → disconnect TickerStream → close database → send "Bot stopped" Telegram alert
+    - Register SIGTERM/SIGINT signal handlers that trigger `stop()`
+    - _Requirements: 2.1, 2.2, 2.3, 2.4_
+  - [x] 17.2 Create `main.py` entry point
+    - Load config, configure logging, create BotEngine, run `asyncio.run(bot.start())`
+    - _Requirements: 2.1, 2.5, 2.6_
+
+- [x] 18. Checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 19. Create Docker deployment files
+  - [x] 19.1 Create `Dockerfile` and `docker-compose.yml`
+    - Dockerfile based on `python:3.11-slim`, installs from `requirements.txt`, runs `python main.py`
+    - docker-compose.yml with volumes for `./data`, `./logs`, `./config.yaml`, `restart: unless-stopped`, JSON file logging (max 10MB, 5 files)
+    - _Requirements: 14.1, 14.2, 14.3, 14.4_
+
+- [x] 20. Create `__init__.py` files and verify project structure
+  - [x] 20.1 Create all `__init__.py` files for package directories
+    - Create `__init__.py` in: `core/`, `streams/`, `strategy/`, `execution/`, `risk/`, `storage/`, `notification/`, `utils/`, `tests/`, `tests/properties/`
+    - Create `tests/conftest.py` with shared fixtures (mock config objects, in-memory database, mock Binance client)
+    - Verify the complete project structure matches the design specification
+    - _Requirements: 2.6_
+
+- [x] 21. Final checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
+## Notes
+
+- Tasks marked with `*` are optional and can be skipped for faster MVP
+- Each task references specific requirements for traceability
+- Checkpoints ensure incremental validation
+- Property tests validate universal correctness properties from the design document (21 properties total)
+- Unit tests validate specific examples and edge cases
+- All config values must come from `config.yaml` / `.env` — no hardcoded magic numbers
+- The position size formula `risk_amount / sl_distance` is mandatory per risk rules and must never be altered
+- SL to breakeven after TP1 is mandatory and non-negotiable

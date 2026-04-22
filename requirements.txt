@@ -1,0 +1,26 @@
+# Exchange SDK
+python-binance==1.0.36
+
+# Data & Indicators
+pandas==2.3.2
+pandas_ta==0.4.71b0
+numpy==2.2.6
+
+# Database
+aiosqlite==0.20.0
+
+# Configuration
+pydantic-settings==2.7.1
+pydantic==2.10.5
+pyyaml==6.0.2
+
+# Logging
+loguru==0.7.3
+
+# HTTP (Telegram)
+httpx==0.28.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.3
+hypothesis==6.122.3
