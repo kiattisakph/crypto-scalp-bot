@@ -1,6 +1,7 @@
 # Exchange SDK (direct HTTP + WebSocket)
 httpx==0.28.1
 websockets>=13.0
+certifi==2026.02.25
 
 # Data & Indicators
 pandas==2.3.2

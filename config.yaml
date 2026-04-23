@@ -1,7 +1,7 @@
 watchlist:
-  top_n: 5
-  min_change_pct_24h: 3.0
-  min_volume_usdt_24h: 10000000
+  top_n: 10
+  min_change_pct_24h: 2.0
+  min_volume_usdt_24h: 5000000
   refresh_interval_sec: 300
   max_concurrent_positions: 3
   blacklist:

@@ -307,6 +307,17 @@ class TopGainersScalping:
         if reservation is None:
             return
 
+        logger.info(
+            "strategy | {symbol} passed all pre-order checks | direction={direction} "
+            "confidence={confidence:.3f} price={price:.8f} qty={qty:.8f} atr={atr}",
+            symbol=symbol,
+            direction=signal.direction.value,
+            confidence=signal.confidence,
+            price=sizing_price,
+            qty=reservation.risk_result.position_size,
+            atr=atr_value,
+        )
+
         try:
             # --- Trade approved — execute ---
             leverage = self._config.risk.leverage

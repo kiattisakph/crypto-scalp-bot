@@ -88,6 +88,23 @@ class TestHandleMessage:
         assert tickers[0].symbol == "SOLUSDT"
 
     @pytest.mark.asyncio
+    async def test_invokes_callback_with_direct_ticker_array(
+        self, stream: TickerStream
+    ) -> None:
+        callback = AsyncMock()
+        stream.on_ticker_update = callback
+
+        msg = [
+            {"s": "SOLUSDT", "P": "5.0", "c": "150.0", "q": "50000000"},
+        ]
+        await stream._handle_message(msg)
+
+        callback.assert_awaited_once()
+        tickers = callback.call_args[0][0]
+        assert len(tickers) == 1
+        assert tickers[0].symbol == "SOLUSDT"
+
+    @pytest.mark.asyncio
     async def test_skips_message_without_data_field(
         self, stream: TickerStream
     ) -> None:

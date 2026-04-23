@@ -18,10 +18,12 @@ import asyncio
 import hashlib
 import hmac
 import json
+import ssl
 import time
 from collections import defaultdict
 from typing import Any, AsyncIterator
 
+import certifi
 import httpx
 from loguru import logger
 from websockets.asyncio.client import connect as ws_connect
@@ -81,6 +83,7 @@ class BinanceClient:
         self._base_url = _DEMO_BASE if demo else _LIVE_BASE
         self._ws_url = _DEMO_WS if demo else _LIVE_WS
         self._http: httpx.AsyncClient | None = None
+        self._ws_ssl_context = ssl.create_default_context(cafile=certifi.where())
 
         # Listen key state (for user-data WebSocket)
         self._listen_key: str | None = None
@@ -396,7 +399,7 @@ class BinanceClient:
 
         while True:
             try:
-                async with ws_connect(url) as ws:
+                async with ws_connect(url, ssl=self._ws_ssl_context) as ws:
                     backoff = 1.0  # reset on successful connect
                     async for raw in ws:
                         msg = json.loads(raw)

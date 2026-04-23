@@ -46,6 +46,8 @@ _DEFAULT_COMPONENT = "bot"
 def _component_filter(record: dict) -> bool:
     """Ensure every log record has a 'component' extra field."""
     record["extra"].setdefault("component", _DEFAULT_COMPONENT)
+    if str(record["message"]).startswith("KlineStream |"):
+        return False
     return True
 
 

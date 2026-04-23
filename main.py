@@ -13,8 +13,8 @@ from core.config import load_config
 from core.logging_setup import setup_logging
 
 
-def main() -> None:
-    """Load config, set up logging, and start the bot."""
+async def run_bot() -> None:
+    """Create and run the bot, ensuring shutdown cleanup on cancellation."""
     # 1. Load and validate configuration
     env, config = load_config()
 
@@ -24,7 +24,15 @@ def main() -> None:
     # 3. Create BotEngine and run
     bot = BotEngine(env=env, config=config)
     try:
-        asyncio.run(bot.start())
+        await bot.start()
+    finally:
+        await bot.stop()
+
+
+def main() -> None:
+    """Load config, set up logging, and start the bot."""
+    try:
+        asyncio.run(run_bot())
     except KeyboardInterrupt:
         pass
 

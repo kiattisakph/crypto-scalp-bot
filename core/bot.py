@@ -74,6 +74,8 @@ class BotEngine:
         self._external_stop_fills: dict[int, dict[str, float]] = {}
         self._pending_fill_symbols: dict[int, str] = {}
         self._reconciliation_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._shutdown_signal_count = 0
 
     # ------------------------------------------------------------------
     # Lifecycle — start
@@ -298,15 +300,39 @@ class BotEngine:
 
     def _register_signal_handlers(self) -> None:
         """Register SIGTERM and SIGINT handlers that trigger ``stop()``."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(
                 sig,
-                lambda: asyncio.create_task(self.stop()),
+                self._request_shutdown,
+                sig,
             )
 
         log.info("Signal handlers registered (SIGTERM, SIGINT)")
+
+    def _request_shutdown(self, sig: signal.Signals) -> None:
+        """Request graceful shutdown from a process signal.
+
+        A second signal exits the main wait loop so Ctrl-C is still usable
+        if a network call or exchange cleanup step is taking too long.
+        """
+        self._shutdown_signal_count += 1
+
+        if self._shutdown_signal_count == 1:
+            log.warning(
+                "Received {signal_name}; starting graceful shutdown",
+                signal_name=sig.name,
+            )
+            self._shutdown_task = asyncio.create_task(self.stop())
+            self._shutdown_task.add_done_callback(self._on_task_done)
+            return
+
+        log.critical(
+            "Received {signal_name} again during shutdown; forcing event loop exit",
+            signal_name=sig.name,
+        )
+        self._stop_event.set()
 
     @staticmethod
     def _on_task_done(task: asyncio.Task[None]) -> None:
@@ -431,6 +457,12 @@ class BotEngine:
         assert self._kline_stream is not None
         assert self._telegram is not None
         assert self._position_manager is not None
+
+        log.info(
+            "watchlist | Applying change: added={added}, removed={removed}",
+            added=added,
+            removed=removed,
+        )
 
         # Subscribe new symbols to KlineStream
         for symbol in added:

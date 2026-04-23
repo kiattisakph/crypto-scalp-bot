@@ -99,7 +99,7 @@ class KlineStream:
         """
         lower = symbol.lower()
         if symbol in self._subscribed_symbols:
-            log.warning(
+            log.debug(
                 "KlineStream | Already subscribed to {symbol}, skipping",
                 symbol=symbol,
             )
@@ -113,7 +113,7 @@ class KlineStream:
         self._tasks[symbol] = asyncio.create_task(
             self._listen(symbol, socket),
         )
-        log.info(
+        log.debug(
             "KlineStream | Subscribed to {symbol} kline streams",
             symbol=symbol,
         )
@@ -128,7 +128,7 @@ class KlineStream:
             symbol: Trading pair symbol (e.g. ``"SOLUSDT"``).
         """
         if symbol not in self._subscribed_symbols:
-            log.warning(
+            log.debug(
                 "KlineStream | Not subscribed to {symbol}, skipping unsubscribe",
                 symbol=symbol,
             )
@@ -155,7 +155,7 @@ class KlineStream:
                     error=str(exc),
                 )
 
-        log.info(
+        log.debug(
             "KlineStream | Unsubscribed from {symbol} kline streams",
             symbol=symbol,
         )
@@ -168,7 +168,7 @@ class KlineStream:
         symbols = list(self._subscribed_symbols)
         for symbol in symbols:
             await self.unsubscribe(symbol)
-        log.info("KlineStream | All streams disconnected")
+        log.debug("KlineStream | All streams disconnected")
 
     def get_subscribed_symbols(self) -> set[str]:
         """Return the set of currently subscribed symbols.
@@ -280,7 +280,7 @@ class KlineStream:
                 self._sockets[symbol] = new_socket
 
                 duration = time.monotonic() - disconnect_start
-                log.info(
+                log.debug(
                     "KlineStream | {symbol} reconnected after {duration:.1f}s",
                     symbol=symbol,
                     duration=duration,

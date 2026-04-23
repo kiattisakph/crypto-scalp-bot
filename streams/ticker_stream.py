@@ -237,20 +237,23 @@ class TickerStream:
                 )
                 backoff = min(backoff * 2, _MAX_BACKOFF)
 
-    async def _handle_message(self, msg: dict) -> None:
+    async def _handle_message(self, msg: dict | list) -> None:
         """Parse a raw WebSocket message and invoke the callback.
 
         The multiplex socket wraps payloads as::
 
             {"stream": "!ticker@arr", "data": [ ... ]}
 
+        Binance may also return the ``!ticker@arr`` payload directly as a
+        list, depending on the stream URL form.
+
         Each element in ``data`` is a 24-hour ticker object.
 
         Args:
-            msg: Raw message dict from the WebSocket.
+            msg: Raw message from the WebSocket.
         """
         try:
-            data = msg.get("data")
+            data = msg if isinstance(msg, list) else msg.get("data")
             if data is None:
                 # Some messages (e.g. error events) lack a data field.
                 log.warning(
