@@ -210,7 +210,8 @@ class TopGainersScalping:
         if signal is None:
             return
 
-        # Market regime check: skip entry if ADX indicates sideways/choppy market.
+        # Market regime check: skip entry if ADX indicates weak trend.
+        # Lowered threshold from 20 to 15 to catch more trending moves.
         adx_value = signal.indicators.get("adx")
         adx_threshold = self._config.strategy.entry.adx_trend_threshold
         if adx_value is not None and adx_value < adx_threshold:

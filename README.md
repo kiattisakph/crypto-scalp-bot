@@ -96,8 +96,8 @@ The bot is designed to run 24/7 on a VPS via Docker with full self-management: a
 ```bash
 git clone <repository-url>
 cd crypto-scalp-bot
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 

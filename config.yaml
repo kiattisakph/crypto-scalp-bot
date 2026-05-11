@@ -21,11 +21,14 @@ strategy:
     rsi_period: 14
     atr_period: 14
     adx_period: 14
-    adx_trend_threshold: 20.0
-    rsi_long_min: 50
-    rsi_long_max: 70
-    rsi_short_min: 30
-    rsi_short_max: 50
+    adx_trend_threshold: 15.0
+
+    # RSI ranges - expanded for pullback entries
+    rsi_long_min: 40
+    rsi_long_max: 75
+    rsi_short_min: 25
+    rsi_short_max: 60
+
     ema_fast: 9
     ema_slow: 21
     ema_trend_fast: 20

@@ -1,15 +1,15 @@
 """Entry signal generation for crypto-scalp-bot.
 
 Calculates technical indicators on 3-minute and 15-minute candle
-DataFrames using pandas_ta and generates LONG/SHORT entry signals
-when all required conditions are met simultaneously.
+DataFrames using the ``ta`` library and generates LONG/SHORT entry
+signals when all required conditions are met simultaneously.
 """
 from __future__ import annotations
 
 import math
 
 import pandas as pd
-import pandas_ta as ta
+import ta as ta_lib
 from loguru import logger
 
 from core.config import EntryConfig
@@ -170,8 +170,12 @@ class SignalEngine:
             Dict with ``ema_trend_fast`` and ``ema_trend_slow`` values,
             or ``None`` if any result is NaN.
         """
-        ema_fast = ta.ema(df_15m["close"], length=self._config.ema_trend_fast)
-        ema_slow = ta.ema(df_15m["close"], length=self._config.ema_trend_slow)
+        ema_fast = ta_lib.trend.EMAIndicator(
+            close=df_15m["close"], window=self._config.ema_trend_fast,
+        ).ema_indicator()
+        ema_slow = ta_lib.trend.EMAIndicator(
+            close=df_15m["close"], window=self._config.ema_trend_slow,
+        ).ema_indicator()
 
         if ema_fast is None or ema_slow is None:
             return None
@@ -195,14 +199,27 @@ class SignalEngine:
             ``atr``, ``adx``, ``ema_fast_prev``, ``ema_slow_prev`` values, or
             ``None`` if any result is NaN.
         """
-        rsi = ta.rsi(df_3m["close"], length=self._config.rsi_period)
-        ema_fast = ta.ema(df_3m["close"], length=self._config.ema_fast)
-        ema_slow = ta.ema(df_3m["close"], length=self._config.ema_slow)
-        volume_ma = ta.sma(df_3m["volume"], length=20)
-        atr = ta.atr(df_3m["high"], df_3m["low"], df_3m["close"],
-                     length=self._config.atr_period)
-        adx = ta.adx(df_3m["high"], df_3m["low"], df_3m["close"],
-                     length=self._config.adx_period)
+        rsi = ta_lib.momentum.RSIIndicator(
+            close=df_3m["close"], window=self._config.rsi_period,
+        ).rsi()
+        ema_fast = ta_lib.trend.EMAIndicator(
+            close=df_3m["close"], window=self._config.ema_fast,
+        ).ema_indicator()
+        ema_slow = ta_lib.trend.EMAIndicator(
+            close=df_3m["close"], window=self._config.ema_slow,
+        ).ema_indicator()
+        volume_ma = ta_lib.trend.SMAIndicator(
+            close=df_3m["volume"], window=20,
+        ).sma_indicator()
+        atr = ta_lib.volatility.AverageTrueRange(
+            high=df_3m["high"], low=df_3m["low"], close=df_3m["close"],
+            window=self._config.atr_period,
+        ).average_true_range()
+        adx_indicator = ta_lib.trend.ADXIndicator(
+            high=df_3m["high"], low=df_3m["low"], close=df_3m["close"],
+            window=self._config.adx_period,
+        )
+        adx = adx_indicator.adx()
 
         if any(s is None for s in (rsi, ema_fast, ema_slow, volume_ma, atr, adx)):
             return None
@@ -212,7 +229,7 @@ class SignalEngine:
         ema_slow_val = ema_slow.iloc[-1]
         volume_ma_val = volume_ma.iloc[-1]
         atr_val = atr.iloc[-1]
-        adx_val = adx["ADX_14"].iloc[-1] if "ADX_14" in adx.columns else float("nan")
+        adx_val = adx.iloc[-1]
 
         # Previous values for crossover detection (up to 2 candles back).
         ema_fast_prev1 = ema_fast.iloc[-2] if len(ema_fast) >= 2 else float("nan")
@@ -260,11 +277,11 @@ class SignalEngine:
 
         Conditions (all must be true simultaneously):
         1. 15m trend: EMA_trend_fast > EMA_trend_slow (uptrend).
-        2. 3m RSI in [rsi_long_min, rsi_long_max].
-        3. 3m EMA_fast crossed above EMA_slow within last 2 candles.
+        2. 3m RSI in [rsi_long_min, rsi_long_max] - allowing pullback entries.
+        3. 3m EMA_fast above EMA_slow (momentum alignment, not requiring fresh cross).
         4. Latest 3m volume > volume_ma × volume_multiplier.
         5. Latest 3m candle is bullish (close > open).
-        6. Latest 3m close < nearest resistance × (1 - resistance_buffer_pct/100).
+        6. Latest 3m close < recent resistance with buffer.
         """
         cfg = self._config
 
@@ -272,12 +289,12 @@ class SignalEngine:
         if ind_15m["ema_trend_fast"] <= ind_15m["ema_trend_slow"]:
             return False
 
-        # 2. RSI range
+        # 2. RSI range - expanded for pullback entries
         if not (cfg.rsi_long_min <= ind_3m["rsi"] <= cfg.rsi_long_max):
             return False
 
-        # 3. EMA crossover within last 2 candles
-        if not self._ema_crossed_above(ind_3m):
+        # 3. EMA alignment: fast above slow (not requiring fresh cross)
+        if ind_3m["ema_fast"] <= ind_3m["ema_slow"]:
             return False
 
         # 4. Volume spike
@@ -310,11 +327,11 @@ class SignalEngine:
 
         Conditions (all must be true simultaneously):
         1. 15m trend: EMA_trend_fast < EMA_trend_slow (downtrend).
-        2. 3m RSI in [rsi_short_min, rsi_short_max].
-        3. 3m EMA_fast crossed below EMA_slow within last 2 candles.
+        2. 3m RSI in [rsi_short_min, rsi_short_max] - allowing pullback entries.
+        3. 3m EMA_fast below EMA_slow (momentum alignment, not requiring fresh cross).
         4. Latest 3m volume > volume_ma × volume_multiplier.
         5. Latest 3m candle is bearish (close < open).
-        6. Latest 3m close > nearest support × (1 + resistance_buffer_pct/100).
+        6. Latest 3m close > recent support with buffer.
         """
         cfg = self._config
 
@@ -326,8 +343,8 @@ class SignalEngine:
         if not (cfg.rsi_short_min <= ind_3m["rsi"] <= cfg.rsi_short_max):
             return False
 
-        # 3. EMA crossover within last 2 candles
-        if not self._ema_crossed_below(ind_3m):
+        # 3. EMA alignment: fast below slow (not requiring fresh cross)
+        if ind_3m["ema_fast"] >= ind_3m["ema_slow"]:
             return False
 
         # 4. Volume spike
